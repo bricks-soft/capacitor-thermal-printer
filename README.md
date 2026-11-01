@@ -30,6 +30,25 @@ Don't forget to add BLUETOOTH and INTERNET (for TCP) permissions and for USB pri
 <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
 ```
 
+#### iOS
+
+The iOS implementation keeps the same JavaScript API, arguments, callbacks and error objects. Its ESC/POS output is a Swift port of DantSu 3.2.1 (the library the Android side uses) and is checked byte for byte against that library (see [Tests](#tests)).
+
+- **Bluetooth printers must support Bluetooth Low Energy.** iOS apps reach Bluetooth printers through [Core Bluetooth](https://developer.apple.com/documentation/corebluetooth). Classic Bluetooth printers that only offer the Serial Port Profile (what Android uses) need Apple's [MFi program](https://mfi.apple.com) and the [External Accessory framework](https://developer.apple.com/documentation/externalaccessory), so iOS cannot reach them. Many printers are dual-mode and also offer BLE.
+- Add `NSBluetoothAlwaysUsageDescription` to `Info.plist` ([reference](https://developer.apple.com/documentation/bundleresources/information-property-list/nsbluetoothalwaysusagedescription)). Cordova fills it from the `BLUETOOTH_USAGE_DESCRIPTION` variable. Capacitor only prints a warning, so add it yourself.
+- TCP printing to a printer on the local network needs `NSLocalNetworkUsageDescription` ([reference](https://developer.apple.com/documentation/bundleresources/information-property-list/nslocalnetworkusagedescription)).
+- USB printers are not supported: `listPrinters({type: 'usb'})` returns `[]`.
+- Plain Cordova projects need Swift support (cordova-ios 6 or newer). Capacitor supports Swift Cordova plugins out of the box.
+
+How the Bluetooth calls behave on iOS:
+
+| Call | Android | iOS |
+| --- | --- | --- |
+| `requestBTPermissions` | Requests the Bluetooth runtime permissions | Shows the iOS Bluetooth prompt the first time; success `{granted: true}`, error `{granted: false}` |
+| `listPrinters({type: 'bluetooth'})` | Paired devices | Printers this app connected to before, plus BLE devices found in a 3-second scan. `address` is the iOS peripheral identifier (a UUID), `type` is `2` (LE) |
+| `id` / `address` | MAC address or name | Peripheral identifier or name; `'first'` picks the first known printer that connects |
+| Writes | RFCOMM stream | The printer's writable GATT characteristic, in chunks of `maximumWriteValueLength`, with iOS flow control |
+
 Run this for getting Bluetooth access permission if needed
 
 ```javascript
@@ -255,3 +274,18 @@ Convert Drawable instance to a hexadecimal string of the image data
 | data.base64 | <code>string</code> | Base64 encoded picture string to convert |
 | successCallback | <code>function</code> | Result on success |
 | errorCallback | <code>function</code> | Result on failure |
+
+<a name="tests"></a>
+
+### Tests
+
+`tests/android-reference/generate.sh` runs DantSu 3.2.1 on the JVM (with `android.graphics.Bitmap` stubs) over `tests/android-reference/cases.json` and writes the expected bytes to `src/ios/Tests/ThermalPrinterTests/Fixtures/android-reference.json`. The iOS tests compare the Swift output with that file and print over TCP to an in-process fake printer:
+
+    $ cd src/ios
+    $ xcodebuild test -scheme ThermalPrinter -destination 'platform=iOS Simulator,name=iPhone 17'
+
+Known differences from Android:
+
+- `<qrcode>` uses Core Image's [QR code generator](https://developer.apple.com/documentation/coreimage/ciqrcodegenerator) instead of ZXing. Short alphanumeric payloads produce the same symbol; other payloads can encode with a different version or mask (still scannable).
+- Images larger than the paper width or 256 dots are scaled with Core Graphics, not Skia, so their pixels can differ. Images that already fit (the usual case) are byte-identical.
+- TCP connections wait up to 5 seconds (Android: 30 ms) and are reopened after the printer closes the socket.
