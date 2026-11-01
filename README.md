@@ -37,7 +37,7 @@ The iOS implementation keeps the JavaScript API, arguments, callbacks and error 
 - **Bluetooth printers must support Bluetooth Low Energy.** iOS apps reach Bluetooth accessories through [Core Bluetooth](https://developer.apple.com/documentation/corebluetooth). Printers that only offer classic Bluetooth's Serial Port Profile (what Android uses) need Apple's [MFi program](https://mfi.apple.com) and the [External Accessory framework](https://developer.apple.com/documentation/externalaccessory), so iOS cannot reach them.
 - Add `NSBluetoothAlwaysUsageDescription` to `Info.plist` ([reference](https://developer.apple.com/documentation/bundleresources/information-property-list/nsbluetoothalwaysusagedescription)). Cordova fills it from the `BLUETOOTH_USAGE_DESCRIPTION` variable. Capacitor only prints a warning, so add it yourself.
 - TCP printing to a printer on the local network needs `NSLocalNetworkUsageDescription` ([reference](https://developer.apple.com/documentation/bundleresources/information-property-list/nslocalnetworkusagedescription)). While iOS asks for local network access, a connection waits up to 60 seconds instead of 5 ([TN3179](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)).
-- The plugin remembers the printers it connected to in `UserDefaults`. `ThermalPrinterCordovaPlugin.bundle/PrivacyInfo.xcprivacy` declares this with reason `CA92.1`; Capacitor and Cordova copy the bundle into the app.
+- The plugin remembers the printers it connected to in `Library/Application Support/ThermalPrinter/known-bluetooth-printers.json`. It calls none of Apple's [required reason APIs](https://developer.apple.com/documentation/bundleresources/describing-use-of-required-reason-api), so it needs no privacy manifest. Capacitor compiles Cordova plugin sources into its generated `CordovaPlugins.framework`, which has no resources of its own, so the plugin could not place a manifest there.
 - A success callback means every byte was handed to the Bluetooth or TCP connection. Bluetooth writes without response have [no delivery guarantee](https://developer.apple.com/documentation/corebluetooth/cbperipheral/writevalue(_:for:type:)), so success does not prove that paper came out. The same holds for Android's RFCOMM stream.
 - If the printer disconnects during a job, the call fails once with `{error: "Unable to send data to device."}` (or `"Bluetooth device disconnected."`). The rest of the job is dropped and the next call reconnects.
 - USB printers are not supported: `listPrinters({type: 'usb'})` returns `[]`.
@@ -55,7 +55,9 @@ How the Bluetooth calls behave on iOS:
 `listPrinters` returns:
 
 1. Devices this app has connected to before, and devices already connected to iOS that expose a known printer service.
-2. Devices found in a 3-second scan that advertise a known printer service, or whose name looks like a printer: it contains `print`, `thermal` or `receipt`, or starts with `MPT`, `MTP`, `RPP`, `XP-`, `PT-`, `ZJ-`, `POS`, `Goojprt` or `PeriPage`. The name rule covers printers that advertise only a name. Other named devices, such as headphones, TVs and watches, are not listed.
+2. Devices found in a 3-second scan that advertise a known printer service, or whose name looks like a printer: it contains `print`, `thermal` or `receipt`, or starts with `MPT`, `MTP`, `RPP`, `XP-`, `PT-`, `ZJ-`, `POS`, `Goojprt` or `PeriPage`. The name rule covers printers that advertise only a name. A device that advertises a printer service but no name is listed as `BLE Printer` plus the first 4 characters of its identifier. Other devices, such as headphones, TVs and watches, are not listed.
+
+A printer that advertises neither a known service nor a printer-like name is not listed. Check each printer model you support from a fresh install.
 
 Known printer services are `18F0`, `E7810A71-73AE-499D-8C15-FAA9AEF0C3F2`, `49535343-FE7D-4AE5-8FA9-9FAFD205E455`, `FF00`, `FFE0` and `6E400001-B5A3-F393-E0A9-E50E24DCCA9E`, the GATT services that BLE ESC/POS printer modules commonly expose.
 
@@ -310,17 +312,22 @@ How the 47 reference cases are compared:
 
 The other Swift tests cover:
 
-- Bluetooth transport, through a fake link: chunks of `maximumWriteValueLength`; flow control, including a missing readiness callback; acknowledged writes; write errors and stalls, after which the buffer is cleared, the link is dropped and a retry sends only its own bytes; late acknowledgements and late connections ignored; connection and discovery timeouts; devices without a printer characteristic; disconnects during a send and between receipt segments; the app receipt sent over Bluetooth with the reference bytes.
+- Bluetooth transport, through a fake link: chunks of `maximumWriteValueLength`; flow control, including a missing readiness callback; acknowledged writes; write errors and stalls, after which the buffer is cleared, the link is dropped and a retry sends only its own bytes; connection and discovery timeouts; devices without a printer characteristic; disconnects during a send and between receipt segments; the app receipt sent over Bluetooth with the reference bytes.
+- Late callbacks. Every connection attempt, discovery and acknowledged write carries its own token. The fake link follows Core Bluetooth's rule that no peripheral callbacks arrive after `didDisconnect`; some tests turn that rule off to check the tokens on their own. Tested: an acknowledgement from a cancelled write that arrives before its disconnect callback, or (with the rule off) after the reconnect, does not complete the newer write. A connection or discovery result from a cancelled attempt does not complete the next attempt. A cancelled link's disconnect does not end the new connection. Core Bluetooth itself is not exercised; a real printer has to qualify that.
+- Discovery through the real scan path, with a fake central manager: devices with a printer service and no name, printer-like names, and unrelated or non-connectable devices.
 - Bluetooth permission and state: prompt allowed, denied or unanswered; restricted access without a prompt; powered off, unsupported and unauthorized errors; waiting for Bluetooth to power on.
 - The plugin API: a disconnect between receipt segments, before the feed or before the cut reports exactly one error.
 - Memory: the parser, its lines, columns and images are released after printing, and 25 long receipts grow the footprint by less than 20 MB. With a strong column back-reference the same test grows it by about 58 MB.
-- TCP, against an in-process fake printer: the reference bytes, a refused port, an unreachable address, reconnecting after the printer closes the socket, and the local network waiting rule.
+- TCP, against an in-process fake printer: the reference bytes, a refused port, an unreachable address, and reconnecting after the printer closes the socket. With a scripted connection: waiting for local network permission and then connecting, the permission wait timing out and cleaning up, other waiting reasons failing at once, the connect timeout, and the printer closing the socket.
+- The remembered-printer file.
 - The Bluetooth listing and characteristic rules above.
 
 Run them on a simulator:
 
     $ cd src/ios
     $ xcodebuild test -scheme ThermalPrinter -destination 'platform=iOS Simulator,name=iPhone 17'
+
+`tests/mutation/run.py` puts back, one at a time, each defect these tests guard against and checks that the tests catch it: `python3 tests/mutation/run.py <repo> <scratch dir> <log dir> <simulator id>`.
 
 Only a real device can show printing on a BLE printer, the local network prompt and Android's own image decoding.
 
