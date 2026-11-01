@@ -229,16 +229,23 @@ final class EscPosPrinterCommands {
         printerConnection.disconnect()
     }
 
+    private func requireConnection() throws {
+        guard printerConnection.isConnected else {
+            printerConnection.clearBuffer()
+            throw EscPosError.connection("Unable to send data to device.")
+        }
+    }
+
     @discardableResult
-    func reset() -> EscPosPrinterCommands {
-        guard printerConnection.isConnected else { return self }
+    func reset() throws -> EscPosPrinterCommands {
+        try requireConnection()
         printerConnection.write(EscPosPrinterCommands.resetPrinter)
         return self
     }
 
     @discardableResult
-    func setAlign(_ align: [UInt8]) -> EscPosPrinterCommands {
-        guard printerConnection.isConnected else { return self }
+    func setAlign(_ align: [UInt8]) throws -> EscPosPrinterCommands {
+        try requireConnection()
         printerConnection.write(align)
         return self
     }
@@ -253,7 +260,7 @@ final class EscPosPrinterCommands {
         textUnderline: [UInt8]? = nil,
         textDoubleStrike: [UInt8]? = nil
     ) throws -> EscPosPrinterCommands {
-        guard printerConnection.isConnected else { return self }
+        try requireConnection()
 
         let size = textSize ?? EscPosPrinterCommands.textSizeNormal
         let color = textColor ?? EscPosPrinterCommands.textColorBlack
@@ -296,7 +303,7 @@ final class EscPosPrinterCommands {
 
     @discardableResult
     func printImage(_ image: [UInt8]) throws -> EscPosPrinterCommands {
-        guard printerConnection.isConnected else { return self }
+        try requireConnection()
         let bytesToPrint = useEscAsteriskCommand ? EscPosPrinterCommands.convertGSv0ToEscAsterisk(image) : [image]
         for bytes in bytesToPrint {
             printerConnection.write(bytes)
@@ -306,8 +313,8 @@ final class EscPosPrinterCommands {
     }
 
     @discardableResult
-    func printBarcode(_ barcode: EscPosBarcode) -> EscPosPrinterCommands {
-        guard printerConnection.isConnected else { return self }
+    func printBarcode(_ barcode: EscPosBarcode) throws -> EscPosPrinterCommands {
+        try requireConnection()
         let code = barcode.code
         let barcodeLength = barcode.codeLength
         var barcodeCommand: [UInt8] = [0x1D, 0x6B, UInt8(truncatingIfNeeded: barcode.barcodeType), UInt8(truncatingIfNeeded: barcodeLength)]
@@ -323,7 +330,7 @@ final class EscPosPrinterCommands {
 
     @discardableResult
     func newLine(_ align: [UInt8]? = nil) throws -> EscPosPrinterCommands {
-        guard printerConnection.isConnected else { return self }
+        try requireConnection()
         printerConnection.write([EscPosPrinterCommands.lineFeed])
         try printerConnection.send()
         if let align = align {
@@ -334,7 +341,7 @@ final class EscPosPrinterCommands {
 
     @discardableResult
     func feedPaper(_ dots: Int) throws -> EscPosPrinterCommands {
-        guard printerConnection.isConnected else { return self }
+        try requireConnection()
         if dots > 0 {
             printerConnection.write([0x1B, 0x4A, UInt8(truncatingIfNeeded: dots)])
             try printerConnection.send(dots)
@@ -344,7 +351,7 @@ final class EscPosPrinterCommands {
 
     @discardableResult
     func cutPaper() throws -> EscPosPrinterCommands {
-        guard printerConnection.isConnected else { return self }
+        try requireConnection()
         printerConnection.write([0x1D, 0x56, 0x01])
         try printerConnection.send(100)
         return self
@@ -352,7 +359,7 @@ final class EscPosPrinterCommands {
 
     @discardableResult
     func openCashBox() throws -> EscPosPrinterCommands {
-        guard printerConnection.isConnected else { return self }
+        try requireConnection()
         printerConnection.write([0x1B, 0x70, 0x00, 0x3C, 0xFF])
         try printerConnection.send(100)
         return self

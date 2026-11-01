@@ -23,10 +23,17 @@ class EscPosDeviceConnection: NSObject {
 
     func send(_ addWaitingTime: Int = 0) throws {
         guard isConnected else {
+            data = []
             throw EscPosError.connection("Unable to send data to device.")
         }
         let payload = data
-        try transmit(payload)
+        do {
+            try transmit(payload)
+        } catch {
+            data = []
+            disconnect()
+            throw error
+        }
         let waitingTime = addWaitingTime + payload.count / 16
         data = []
         if pacesSends && waitingTime > 0 {

@@ -26,7 +26,7 @@ final class EscPosPrinter: EscPosPrinterSize {
 
         let linesParsed = try PrinterTextParser(printer: self).setFormattedText(JavaString(text)).parse()
 
-        printer.reset()
+        try printer.reset()
 
         for line in linesParsed {
             var lastElement: PrinterTextParserElement?

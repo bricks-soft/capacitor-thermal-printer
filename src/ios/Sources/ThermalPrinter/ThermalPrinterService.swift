@@ -89,12 +89,22 @@ final class ThermalPrinterService {
     private let queue = DispatchQueue(label: "de.paystory.thermal-printer.commands")
     private var connections: [String: EscPosDeviceConnection] = [:]
     private var bluetoothCentral: EscPosBluetoothCentral?
+    private let makeBluetoothCentral: () -> EscPosBluetoothCentral
+    private let makeTcpConnection: (String, Int) -> EscPosDeviceConnection
+
+    init(
+        makeBluetoothCentral: @escaping () -> EscPosBluetoothCentral = { EscPosBluetoothCentral() },
+        makeTcpConnection: @escaping (String, Int) -> EscPosDeviceConnection = { EscPosTcpConnection(address: $0, port: $1) }
+    ) {
+        self.makeBluetoothCentral = makeBluetoothCentral
+        self.makeTcpConnection = makeTcpConnection
+    }
 
     private var bluetooth: EscPosBluetoothCentral {
         if let central = bluetoothCentral {
             return central
         }
-        let central = EscPosBluetoothCentral()
+        let central = makeBluetoothCentral()
         bluetoothCentral = central
         return central
     }
@@ -188,8 +198,10 @@ final class ThermalPrinterService {
             }
             return .success(nil)
         } catch let failure as EscPosError {
+            printer.printer?.printerConnection.clearBuffer()
             throw ThermalPrinterFailure(payload: ["error": failure.message])
         } catch let failure as ThermalPrinterJSONError {
+            printer.printer?.printerConnection.clearBuffer()
             throw ThermalPrinterFailure(payload: ["error": failure.message])
         }
     }
@@ -321,7 +333,7 @@ final class ThermalPrinterService {
             }
             return bluetooth.connection(for: peripheral)
         case "tcp":
-            return EscPosTcpConnection(address: address, port: port)
+            return makeTcpConnection(address, port)
         default:
             return nil
         }
