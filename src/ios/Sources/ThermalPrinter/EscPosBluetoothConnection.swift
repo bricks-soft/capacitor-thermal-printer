@@ -2,12 +2,12 @@ import CoreBluetooth
 import Foundation
 
 protocol EscPosBluetoothLinkEvents: AnyObject {
-    func linkDidConnect()
-    func linkDidFailToConnect(_ error: Error?)
-    func linkDidDisconnect(_ error: Error?)
-    func linkDidDiscover(writeType: CBCharacteristicWriteType?, error: Error?)
-    func linkDidWrite(_ error: Error?)
-    func linkIsReadyToSend()
+    func linkDidConnect(attempt: Int)
+    func linkDidFailToConnect(attempt: Int, error: Error?)
+    func linkDidDisconnect(attempt: Int, error: Error?)
+    func linkDidDiscover(attempt: Int, writeType: CBCharacteristicWriteType?, error: Error?)
+    func linkDidWrite(token: Int, error: Error?)
+    func linkIsReadyToSend(attempt: Int)
 }
 
 protocol EscPosBluetoothLink: AnyObject {
@@ -15,10 +15,11 @@ protocol EscPosBluetoothLink: AnyObject {
     var isConnected: Bool { get }
     var canSendWriteWithoutResponse: Bool { get }
     func maximumWriteValueLength(for type: CBCharacteristicWriteType) -> Int
-    func connect()
+    func connect(attempt: Int)
+    func adopt(attempt: Int)
     func cancel()
-    func discoverPrinterCharacteristic()
-    func write(_ data: Data, type: CBCharacteristicWriteType)
+    func discoverPrinterCharacteristic(attempt: Int)
+    func write(_ data: Data, type: CBCharacteristicWriteType, token: Int)
 }
 
 struct EscPosBluetoothTimeouts {
@@ -37,12 +38,14 @@ final class EscPosBluetoothConnection: EscPosDeviceConnection, EscPosBluetoothLi
 
     private final class Operation {
         let kind: OperationKind
+        let token: Int
         let semaphore = DispatchSemaphore(value: 0)
         var finished = false
         var error: Error?
 
-        init(kind: OperationKind) {
+        init(kind: OperationKind, token: Int) {
             self.kind = kind
+            self.token = token
         }
     }
 
@@ -52,12 +55,14 @@ final class EscPosBluetoothConnection: EscPosDeviceConnection, EscPosBluetoothLi
     private let queue: EscPosQueue
     private let timeouts: EscPosBluetoothTimeouts
     private let onConnected: (() -> Void)?
+    private var attempt = 0
+    private var lastToken = 0
     private var linkUp = false
+    private var tearingDown = false
     private var writeType: CBCharacteristicWriteType?
     private var current: Operation?
     private var readiness: DispatchSemaphore?
-    private var cancelPending = false
-    private(set) var ignoredCallbacks = 0
+    private var ignoredCallbacks = 0
 
     init(link: EscPosBluetoothLink, queue: EscPosQueue, timeouts: EscPosBluetoothTimeouts = EscPosBluetoothTimeouts(), onConnected: (() -> Void)? = nil) {
         self.link = link
@@ -82,24 +87,25 @@ final class EscPosBluetoothConnection: EscPosDeviceConnection, EscPosBluetoothLi
             return self
         }
         do {
-            let alreadyLinked = queue.sync { () -> Bool in
+            let connecting = queue.sync { () -> Operation? in
+                attempt = nextToken()
                 writeType = nil
-                if link.isConnected && !cancelPending {
+                if link.isConnected && !tearingDown {
                     linkUp = true
+                    link.adopt(attempt: attempt)
+                    return nil
                 }
-                return linkUp
+                linkUp = false
+                let operation = begin(.connect, token: attempt)
+                link.connect(attempt: attempt)
+                return operation
             }
-            if !alreadyLinked {
-                let operation = queue.sync { () -> Operation in
-                    let operation = begin(.connect)
-                    link.connect()
-                    return operation
-                }
+            if let operation = connecting {
                 try waitFor(operation, timeout: timeouts.connect)
             }
             let discovery = queue.sync { () -> Operation in
-                let operation = begin(.discovery)
-                link.discoverPrinterCharacteristic()
+                let operation = begin(.discovery, token: attempt)
+                link.discoverPrinterCharacteristic(attempt: attempt)
                 return operation
             }
             try waitFor(discovery, timeout: timeouts.discovery)
@@ -137,13 +143,13 @@ final class EscPosBluetoothConnection: EscPosDeviceConnection, EscPosBluetoothLi
                 try waitUntilReadyToWrite()
                 try queue.sync {
                     guard linkUp else { throw EscPosError.connection("Bluetooth device disconnected.") }
-                    link.write(chunk, type: .withoutResponse)
+                    link.write(chunk, type: .withoutResponse, token: nextToken())
                 }
             } else {
                 let operation = try queue.sync { () -> Operation in
                     guard linkUp else { throw EscPosError.connection("Bluetooth device disconnected.") }
-                    let operation = begin(.write)
-                    link.write(chunk, type: .withResponse)
+                    let operation = begin(.write, token: nextToken())
+                    link.write(chunk, type: .withResponse, token: operation.token)
                     return operation
                 }
                 do {
@@ -161,73 +167,79 @@ final class EscPosBluetoothConnection: EscPosDeviceConnection, EscPosBluetoothLi
         }
     }
 
-    func linkDidConnect() {
-        guard current?.kind == .connect else {
+    func linkDidConnect(attempt connected: Int) {
+        guard connected == attempt, let operation = current, operation.kind == .connect, operation.token == connected else {
             ignoredCallbacks += 1
             return
         }
         linkUp = true
-        complete(.connect, error: nil)
+        finish(operation, error: nil)
     }
 
-    func linkDidFailToConnect(_ error: Error?) {
-        complete(.connect, error: error ?? LinkFailure())
-    }
-
-    func linkDidDisconnect(_ error: Error?) {
-        if cancelPending {
-            cancelPending = false
-            ignoredCallbacks += 1
-            return
-        }
-        let wasUp = linkUp
-        linkUp = false
-        writeType = nil
-        readiness?.signal()
-        guard let operation = current else { return }
-        if operation.kind == .connect && !wasUp {
+    func linkDidFailToConnect(attempt failed: Int, error: Error?) {
+        guard failed == attempt, let operation = current, operation.kind == .connect, operation.token == failed else {
             ignoredCallbacks += 1
             return
         }
         finish(operation, error: error ?? LinkFailure())
     }
 
-    func linkDidDiscover(writeType discovered: CBCharacteristicWriteType?, error: Error?) {
-        guard current?.kind == .discovery else {
+    func linkDidDisconnect(attempt ended: Int, error: Error?) {
+        guard ended == attempt else {
+            tearingDown = false
             ignoredCallbacks += 1
             return
         }
-        if error == nil, let discovered = discovered {
-            writeType = discovered
-            complete(.discovery, error: nil)
-        } else {
-            complete(.discovery, error: error ?? LinkFailure())
+        linkUp = false
+        writeType = nil
+        readiness?.signal()
+        if let operation = current {
+            finish(operation, error: error ?? LinkFailure())
         }
     }
 
-    func linkDidWrite(_ error: Error?) {
-        complete(.write, error: error)
+    func linkDidDiscover(attempt discovered: Int, writeType found: CBCharacteristicWriteType?, error: Error?) {
+        guard discovered == attempt, let operation = current, operation.kind == .discovery, operation.token == discovered else {
+            ignoredCallbacks += 1
+            return
+        }
+        if error == nil, let found = found {
+            writeType = found
+            finish(operation, error: nil)
+        } else {
+            finish(operation, error: error ?? LinkFailure())
+        }
     }
 
-    func linkIsReadyToSend() {
-        readiness?.signal()
-    }
-
-    private func begin(_ kind: OperationKind) -> Operation {
-        let operation = Operation(kind: kind)
-        current = operation
-        return operation
-    }
-
-    private func complete(_ kind: OperationKind, error: Error?) {
-        guard let operation = current, operation.kind == kind, !operation.finished else {
+    func linkDidWrite(token: Int, error: Error?) {
+        guard let operation = current, operation.kind == .write, operation.token == token else {
             ignoredCallbacks += 1
             return
         }
         finish(operation, error: error)
     }
 
+    func linkIsReadyToSend(attempt ready: Int) {
+        guard ready == attempt else {
+            ignoredCallbacks += 1
+            return
+        }
+        readiness?.signal()
+    }
+
+    private func nextToken() -> Int {
+        lastToken += 1
+        return lastToken
+    }
+
+    private func begin(_ kind: OperationKind, token: Int) -> Operation {
+        let operation = Operation(kind: kind, token: token)
+        current = operation
+        return operation
+    }
+
     private func finish(_ operation: Operation, error: Error?) {
+        guard !operation.finished else { return }
         operation.finished = true
         operation.error = error
         if current === operation {
@@ -238,19 +250,8 @@ final class EscPosBluetoothConnection: EscPosDeviceConnection, EscPosBluetoothLi
 
     private func waitFor(_ operation: Operation, timeout: TimeInterval) throws {
         if operation.semaphore.wait(timeout: .now() + timeout) == .timedOut {
-            let completedLate = queue.sync { () -> Bool in
-                if operation.finished {
-                    return true
-                }
-                operation.finished = true
-                operation.error = EscPosError.connection("Timed out while waiting for the Bluetooth device.")
-                if current === operation {
-                    current = nil
-                }
-                return false
-            }
-            if !completedLate {
-                throw operation.error ?? LinkFailure()
+            queue.sync {
+                finish(operation, error: EscPosError.connection("Timed out while waiting for the Bluetooth device."))
             }
         }
         if let error = queue.sync({ operation.error }) {
@@ -282,8 +283,9 @@ final class EscPosBluetoothConnection: EscPosDeviceConnection, EscPosBluetoothLi
     private func invalidate() {
         queue.sync {
             if link.isConnected {
-                cancelPending = true
+                tearingDown = true
             }
+            attempt = nextToken()
             linkUp = false
             writeType = nil
             if let operation = current {

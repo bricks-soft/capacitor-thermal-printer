@@ -13,8 +13,15 @@ protocol EscPosCentralManaging: AnyObject {
 
 extension CBCentralManager: EscPosCentralManaging {}
 
+protocol EscPosDiscoveredPeripheral: AnyObject {
+    var identifier: UUID { get }
+    var name: String? { get }
+}
+
+extension CBPeripheral: EscPosDiscoveredPeripheral {}
+
 struct EscPosBluetoothDevice {
-    let peripheral: CBPeripheral
+    let peripheral: EscPosDiscoveredPeripheral
     let name: String?
     let services: [CBUUID]
     let isPrinterCandidate: Bool
@@ -27,12 +34,14 @@ final class EscPosBluetoothCentral: NSObject, CBCentralManagerDelegate {
     static var stateTimeout: TimeInterval = 10
     static var authorizationTimeout: TimeInterval = 60
 
-    private static let knownPeripheralsKey = "ThermalPrinterKnownBluetoothPeripherals"
+    static func fallbackName(for identifier: UUID) -> String {
+        "BLE Printer \(identifier.uuidString.prefix(4))"
+    }
 
     let queue = EscPosQueue(label: "de.paystory.thermal-printer.bluetooth")
     private let authorizationSource: () -> CBManagerAuthorization
     private let makeManager: (EscPosBluetoothCentral) -> EscPosCentralManaging
-    private let defaults: UserDefaults
+    private let store: EscPosKnownPrinterStore
     private var manager: EscPosCentralManaging?
     private var stateEvent: DispatchSemaphore?
     private var scanEvent: DispatchSemaphore?
@@ -45,11 +54,11 @@ final class EscPosBluetoothCentral: NSObject, CBCentralManagerDelegate {
 
     init(
         authorization: @escaping () -> CBManagerAuthorization = { CBManager.authorization },
-        defaults: UserDefaults = .standard,
+        store: EscPosKnownPrinterStore = EscPosKnownPrinterStore(),
         makeManager: ((EscPosBluetoothCentral) -> EscPosCentralManaging)? = nil
     ) {
         self.authorizationSource = authorization
-        self.defaults = defaults
+        self.store = store
         self.makeManager = makeManager ?? { central in
             CBCentralManager(delegate: central, queue: central.queue.queue, options: [CBCentralManagerOptionShowPowerAlertKey: false])
         }
@@ -58,10 +67,6 @@ final class EscPosBluetoothCentral: NSObject, CBCentralManagerDelegate {
 
     var authorization: CBManagerAuthorization {
         authorizationSource()
-    }
-
-    var managerCreated: Bool {
-        queue.sync { manager != nil }
     }
 
     func waitForAuthorization() -> CBManagerAuthorization {
@@ -105,7 +110,7 @@ final class EscPosBluetoothCentral: NSObject, CBCentralManagerDelegate {
             stateEvent?.signal()
             guard let manager = manager, manager.state != .poweredOn else { return }
             for link in links.values {
-                link.events?.linkDidDisconnect(nil)
+                link.handleDisconnected(nil)
             }
         }
     }
@@ -123,7 +128,7 @@ final class EscPosBluetoothCentral: NSObject, CBCentralManagerDelegate {
             for link in links.values where link.isConnected {
                 add(link.peripheral)
             }
-            let remembered = rememberedPeripherals().keys.compactMap { UUID(uuidString: $0) }
+            let remembered = store.load().keys.compactMap { UUID(uuidString: $0) }
             if !remembered.isEmpty {
                 manager.retrievePeripherals(withIdentifiers: remembered).forEach(add)
             }
@@ -180,21 +185,21 @@ final class EscPosBluetoothCentral: NSObject, CBCentralManagerDelegate {
         let matchesName: (EscPosBluetoothDevice) -> Bool = { device in
             device.name == id || device.peripheral.name == id
         }
-        if let peripheral = queue.sync({ lastScanResults.first(where: matchesName)?.peripheral }) {
+        if let peripheral = queue.sync({ lastScanResults.first(where: matchesName)?.peripheral as? CBPeripheral }) {
             return peripheral
         }
-        if let peripheral = knownDevices().first(where: matchesName)?.peripheral {
+        if let peripheral = knownDevices().first(where: matchesName)?.peripheral as? CBPeripheral {
             return peripheral
         }
-        return scan(duration: EscPosBluetoothCentral.scanDuration, until: matchesName).first(where: matchesName)?.peripheral
+        return scan(duration: EscPosBluetoothCentral.scanDuration, until: matchesName).first(where: matchesName)?.peripheral as? CBPeripheral
     }
 
     func candidatesForFirst() -> [CBPeripheral] {
         let known = knownDevices()
         if !known.isEmpty {
-            return known.map(\.peripheral)
+            return known.compactMap { $0.peripheral as? CBPeripheral }
         }
-        return scan(duration: EscPosBluetoothCentral.scanDuration).filter(\.isPrinterCandidate).map(\.peripheral)
+        return scan(duration: EscPosBluetoothCentral.scanDuration).filter(\.isPrinterCandidate).compactMap { $0.peripheral as? CBPeripheral }
     }
 
     func connection(for peripheral: CBPeripheral) -> EscPosBluetoothConnection {
@@ -221,19 +226,39 @@ final class EscPosBluetoothCentral: NSObject, CBCentralManagerDelegate {
     }
 
     func remember(_ peripheral: CBPeripheral) {
-        queue.sync {
-            var remembered = rememberedPeripherals()
-            remembered[peripheral.identifier.uuidString] = displayName(for: peripheral) ?? peripheral.name ?? ""
-            defaults.set(remembered, forKey: EscPosBluetoothCentral.knownPeripheralsKey)
+        let name = queue.sync { displayName(for: peripheral) ?? peripheral.name ?? EscPosBluetoothCentral.fallbackName(for: peripheral.identifier) }
+        store.remember(identifier: peripheral.identifier, name: name)
+    }
+
+    func record(_ peripheral: EscPosDiscoveredPeripheral, advertisementData: [String: Any]) {
+        guard scanEvent != nil else { return }
+        let connectable = (advertisementData[CBAdvertisementDataIsConnectable] as? NSNumber)?.boolValue
+        if connectable == false {
+            return
+        }
+        let services = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
+        let localName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
+        let advertisedName = [localName, peripheral.name].compactMap { $0 }.first { !$0.isEmpty }
+        let isPrinterCandidate = EscPosBluetoothRules.isPrinterCandidate(name: advertisedName, advertisedServices: services, connectable: connectable)
+        guard advertisedName != nil || isPrinterCandidate else { return }
+        if displayNames[peripheral.identifier] == nil {
+            displayNames[peripheral.identifier] = advertisedName ?? EscPosBluetoothCentral.fallbackName(for: peripheral.identifier)
+        }
+        guard !scanResults.contains(where: { $0.identifier == peripheral.identifier }) else { return }
+        let device = EscPosBluetoothDevice(
+            peripheral: peripheral,
+            name: displayName(for: peripheral),
+            services: services,
+            isPrinterCandidate: isPrinterCandidate
+        )
+        scanResults.append(device)
+        if let match = scanMatch, match(device) {
+            scanEvent?.signal()
         }
     }
 
-    private func rememberedPeripherals() -> [String: String] {
-        defaults.dictionary(forKey: EscPosBluetoothCentral.knownPeripheralsKey) as? [String: String] ?? [:]
-    }
-
-    private func displayName(for peripheral: CBPeripheral) -> String? {
-        if let remembered = rememberedPeripherals()[peripheral.identifier.uuidString], !remembered.isEmpty {
+    private func displayName(for peripheral: EscPosDiscoveredPeripheral) -> String? {
+        if let remembered = store.load()[peripheral.identifier.uuidString], !remembered.isEmpty {
             return remembered
         }
         if let name = displayNames[peripheral.identifier], !name.isEmpty {
@@ -257,41 +282,19 @@ final class EscPosBluetoothCentral: NSObject, CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String: Any], rssi RSSI: NSNumber) {
-        guard scanEvent != nil else { return }
-        let connectable = (advertisementData[CBAdvertisementDataIsConnectable] as? NSNumber)?.boolValue
-        if connectable == false {
-            return
-        }
-        let localName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
-        let name = [localName, peripheral.name].compactMap { $0 }.first { !$0.isEmpty }
-        guard let resolvedName = name else { return }
-        if displayNames[peripheral.identifier] == nil {
-            displayNames[peripheral.identifier] = resolvedName
-        }
-        guard !scanResults.contains(where: { $0.identifier == peripheral.identifier }) else { return }
-        let services = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
-        let device = EscPosBluetoothDevice(
-            peripheral: peripheral,
-            name: displayName(for: peripheral),
-            services: services,
-            isPrinterCandidate: EscPosBluetoothRules.isPrinterCandidate(name: resolvedName, advertisedServices: services, connectable: connectable)
-        )
-        scanResults.append(device)
-        if let match = scanMatch, match(device) {
-            scanEvent?.signal()
-        }
+        record(peripheral, advertisementData: advertisementData)
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        links[peripheral.identifier]?.events?.linkDidConnect()
+        links[peripheral.identifier]?.handleConnected()
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-        links[peripheral.identifier]?.events?.linkDidFailToConnect(error)
+        links[peripheral.identifier]?.handleFailedToConnect(error)
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        links[peripheral.identifier]?.events?.linkDidDisconnect(error)
+        links[peripheral.identifier]?.handleDisconnected(error)
     }
 }
 
@@ -299,6 +302,11 @@ final class EscPosCoreBluetoothLink: NSObject, EscPosBluetoothLink, CBPeripheral
     let peripheral: CBPeripheral
     weak var events: EscPosBluetoothLinkEvents?
     private unowned let central: EscPosBluetoothCentral
+    private var session: Int?
+    private var closingSession: Int?
+    private var pendingConnect: Int?
+    private var pendingDiscovery: Int?
+    private var pendingWrites: [Int] = []
     private var characteristic: CBCharacteristic?
     private var pendingCharacteristicDiscoveries = 0
 
@@ -316,36 +324,74 @@ final class EscPosCoreBluetoothLink: NSObject, EscPosBluetoothLink, CBPeripheral
         peripheral.maximumWriteValueLength(for: type)
     }
 
-    func connect() {
+    func connect(attempt: Int) {
+        resetSession()
+        pendingConnect = attempt
         peripheral.delegate = self
         central.startConnecting(peripheral)
     }
 
+    func adopt(attempt: Int) {
+        resetSession()
+        session = attempt
+        peripheral.delegate = self
+    }
+
     func cancel() {
-        characteristic = nil
+        closingSession = session ?? pendingConnect
+        resetSession()
         central.cancelConnection(peripheral)
     }
 
-    func discoverPrinterCharacteristic() {
+    func discoverPrinterCharacteristic(attempt: Int) {
+        guard session == attempt else { return }
         characteristic = nil
         pendingCharacteristicDiscoveries = 0
-        peripheral.delegate = self
+        pendingDiscovery = attempt
         peripheral.discoverServices(nil)
     }
 
-    func write(_ data: Data, type: CBCharacteristicWriteType) {
-        guard let characteristic = characteristic else {
+    func write(_ data: Data, type: CBCharacteristicWriteType, token: Int) {
+        guard session != nil, let characteristic = characteristic else {
             if type == .withResponse {
-                events?.linkDidWrite(EscPosError.connection("Unable to send data to device."))
+                events?.linkDidWrite(token: token, error: EscPosError.connection("Unable to send data to device."))
             }
             return
+        }
+        if type == .withResponse {
+            pendingWrites.append(token)
         }
         peripheral.writeValue(data, for: characteristic, type: type)
     }
 
+    func handleConnected() {
+        guard let attempt = pendingConnect else { return }
+        pendingConnect = nil
+        session = attempt
+        events?.linkDidConnect(attempt: attempt)
+    }
+
+    func handleFailedToConnect(_ error: Error?) {
+        guard let attempt = pendingConnect else { return }
+        pendingConnect = nil
+        events?.linkDidFailToConnect(attempt: attempt, error: error)
+    }
+
+    func handleDisconnected(_ error: Error?) {
+        if let live = session {
+            resetSession()
+            events?.linkDidDisconnect(attempt: live, error: error)
+        } else if let closing = closingSession {
+            closingSession = nil
+            events?.linkDidDisconnect(attempt: closing, error: error)
+        }
+    }
+
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        guard session != nil, let attempt = pendingDiscovery else { return }
         if let error = error {
-            events?.linkDidDiscover(writeType: nil, error: error)
+            pendingDiscovery = nil
+            events?.linkDidDiscover(attempt: attempt, writeType: nil, error: error)
             return
         }
         let services = peripheral.services ?? []
@@ -360,6 +406,7 @@ final class EscPosCoreBluetoothLink: NSObject, EscPosBluetoothLink, CBPeripheral
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+        guard session != nil, pendingDiscovery != nil else { return }
         pendingCharacteristicDiscoveries -= 1
         if pendingCharacteristicDiscoveries == 0 {
             finishDiscovery()
@@ -367,19 +414,32 @@ final class EscPosCoreBluetoothLink: NSObject, EscPosBluetoothLink, CBPeripheral
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
-        events?.linkDidWrite(error)
+        guard session != nil, !pendingWrites.isEmpty else { return }
+        events?.linkDidWrite(token: pendingWrites.removeFirst(), error: error)
     }
 
     func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
-        events?.linkIsReadyToSend()
+        guard let attempt = session else { return }
+        events?.linkIsReadyToSend(attempt: attempt)
     }
 
     private func finishDiscovery() {
+        guard let attempt = pendingDiscovery else { return }
+        pendingDiscovery = nil
         if let (found, type) = EscPosBluetoothRules.selectCharacteristic(in: peripheral.services ?? []) {
             characteristic = found
-            events?.linkDidDiscover(writeType: type, error: nil)
+            events?.linkDidDiscover(attempt: attempt, writeType: type, error: nil)
         } else {
-            events?.linkDidDiscover(writeType: nil, error: nil)
+            events?.linkDidDiscover(attempt: attempt, writeType: nil, error: nil)
         }
+    }
+
+    private func resetSession() {
+        session = nil
+        pendingConnect = nil
+        pendingDiscovery = nil
+        pendingWrites = []
+        characteristic = nil
+        pendingCharacteristicDiscoveries = 0
     }
 }
