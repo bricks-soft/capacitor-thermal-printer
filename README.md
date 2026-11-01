@@ -313,7 +313,8 @@ How the 47 reference cases are compared:
 The other Swift tests cover:
 
 - Bluetooth transport, through a fake link: chunks of `maximumWriteValueLength`; flow control, including a missing readiness callback; acknowledged writes; write errors and stalls, after which the buffer is cleared, the link is dropped and a retry sends only its own bytes; connection and discovery timeouts; devices without a printer characteristic; disconnects during a send and between receipt segments; the app receipt sent over Bluetooth with the reference bytes.
-- Late callbacks. Every connection attempt, discovery and acknowledged write carries its own token. The fake link follows Core Bluetooth's rule that no peripheral callbacks arrive after `didDisconnect`; some tests turn that rule off to check the tokens on their own. Tested: an acknowledgement from a cancelled write that arrives before its disconnect callback, or (with the rule off) after the reconnect, does not complete the newer write. A connection or discovery result from a cancelled attempt does not complete the next attempt. A cancelled link's disconnect does not end the new connection. Core Bluetooth itself is not exercised; a real printer has to qualify that.
+- Late callbacks. Every connection attempt, discovery and acknowledged write carries its own token. The fake link follows Core Bluetooth's rule that no peripheral callbacks arrive after `didDisconnect`; some tests turn that rule off to check the tokens on their own. Tested: an acknowledgement from a cancelled write that arrives before its disconnect callback, or (with the rule off) after the reconnect, does not complete the newer write. A connection or discovery result from a cancelled attempt does not complete the next attempt. A cancelled link's disconnect does not end the new connection.
+- The Core Bluetooth adapter starts the next connection only after the cancelled one ends with `didDisconnect` or `didFailToConnect`, or after 2 seconds if neither arrives. This is tested through the adapter class with a stubbed peripheral: connect, cancel, connect, then the old `didConnect` and `didDisconnect`; a cancelled pending connection ending in `didFailToConnect`; adopting during a cancellation; a missing terminal callback; and a full reconnect through the connection. Core Bluetooth itself is not exercised; a real printer has to qualify that.
 - Discovery through the real scan path, with a fake central manager: devices with a printer service and no name, printer-like names, and unrelated or non-connectable devices.
 - Bluetooth permission and state: prompt allowed, denied or unanswered; restricted access without a prompt; powered off, unsupported and unauthorized errors; waiting for Bluetooth to power on.
 - The plugin API: a disconnect between receipt segments, before the feed or before the cut reports exactly one error.
@@ -327,7 +328,7 @@ Run them on a simulator:
     $ cd src/ios
     $ xcodebuild test -scheme ThermalPrinter -destination 'platform=iOS Simulator,name=iPhone 17'
 
-`tests/mutation/run.py` puts back, one at a time, each defect these tests guard against and checks that the tests catch it: `python3 tests/mutation/run.py <repo> <scratch dir> <log dir> <simulator id>`.
+`tests/mutation/run.py` puts back, one at a time, each defect these tests guard against and checks that the tests catch it: `python3 tests/mutation/run.py <repo> <scratch dir> <log dir> <simulator id>`. It exits 1 if a mutation survives (`MISSED`) or its tests do not run, for example because the build fails (`INFRA`). `MUTATIONS_MODULE=selftest_mutations` runs one example of each.
 
 Only a real device can show printing on a BLE printer, the local network prompt and Android's own image decoding.
 

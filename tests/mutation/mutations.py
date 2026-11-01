@@ -86,3 +86,15 @@ MUTATIONS += [
      "old": "        return printerNameFragments.contains { name.contains($0) } || printerNamePrefixes.contains { name.hasPrefix($0) }", "new": "        return true",
      "tests": [T + "BluetoothSelectionTests/testSkipsUnrelatedNamedDevices", T + "BluetoothDiscoveryTests/testListPrintersAppliesTheDiscoveryRuleToScanResults"]},
 ]
+
+MUTATIONS += [
+    {"name": "28-connect-during-cancellation", "round": 3, "file": S + "EscPosCoreBluetoothLink.swift",
+     "old": "    func connect(attempt: Int) {\n        resetSession()\n        if closing != nil {\n            queuedConnect = attempt\n            return\n        }\n", "new": "    func connect(attempt: Int) {\n        resetSession()\n",
+     "tests": [T + "CoreBluetoothLinkTests/testCancelledPendingConnectionDefersTheNextConnectUntilItsDisconnect", T + "CoreBluetoothLinkTests/testFailedConnectionEndsTheCancellationOfAPendingConnect", T + "CoreBluetoothLinkTests/testCancelledSessionDropsItsCallbacksAndDefersTheReconnect", T + "CoreBluetoothLinkTests/testConnectionReconnectsThroughTheAdapterAfterACancelledAttempt"]},
+    {"name": "29-adopt-during-cancellation", "round": 3, "file": S + "EscPosCoreBluetoothLink.swift",
+     "old": "    func adopt(attempt: Int) {\n        resetSession()\n        if closing != nil {\n            queuedConnect = attempt\n            return\n        }\n", "new": "    func adopt(attempt: Int) {\n        resetSession()\n",
+     "tests": [T + "CoreBluetoothLinkTests/testAdoptDuringCancellationWaitsAndReconnects"]},
+    {"name": "30-no-cancellation-grace", "round": 3, "file": S + "EscPosCoreBluetoothLink.swift",
+     "old": "            self.finishCancellation { $0.linkDidDisconnect(attempt: open, error: nil) }", "new": "            _ = cancellation",
+     "tests": [T + "CoreBluetoothLinkTests/testMissingTerminalCallbackReleasesTheNextConnectAfterTheGracePeriod"]},
+]

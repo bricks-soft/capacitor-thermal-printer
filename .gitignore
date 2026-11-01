@@ -4,3 +4,4 @@
 
 src/ios/.build/
 src/ios/.swiftpm/
+__pycache__/
