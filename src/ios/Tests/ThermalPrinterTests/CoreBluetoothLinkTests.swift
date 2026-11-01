@@ -116,6 +116,7 @@ final class CoreBluetoothLinkTests: XCTestCase {
             link.connect(attempt: 1)
             link.cancel()
             link.connect(attempt: 2)
+            XCTAssertEqual(driver.connectCalls, 1, "the second connect waits for the cancellation")
             link.handleFailedToConnect(nil)
             XCTAssertEqual(events.log, ["failed 1"])
             XCTAssertEqual(driver.connectCalls, 2)
