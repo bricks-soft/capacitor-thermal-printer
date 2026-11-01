@@ -43,6 +43,8 @@
         <source-file src="src/ios/Sources/ThermalPrinter/EscPosBarcode.swift" />
         <source-file src="src/ios/Sources/ThermalPrinter/EscPosBitmap.swift" />
         <source-file src="src/ios/Sources/ThermalPrinter/EscPosBluetooth.swift" />
+        <source-file src="src/ios/Sources/ThermalPrinter/EscPosBluetoothConnection.swift" />
+        <source-file src="src/ios/Sources/ThermalPrinter/EscPosBluetoothRules.swift" />
         <source-file src="src/ios/Sources/ThermalPrinter/EscPosCharsetEncoding.swift" />
         <source-file src="src/ios/Sources/ThermalPrinter/EscPosDeviceConnection.swift" />
         <source-file src="src/ios/Sources/ThermalPrinter/EscPosJavaCompat.swift" />
@@ -50,9 +52,11 @@
         <source-file src="src/ios/Sources/ThermalPrinter/EscPosPrinterCommands.swift" />
         <source-file src="src/ios/Sources/ThermalPrinter/EscPosPrinterSize.swift" />
         <source-file src="src/ios/Sources/ThermalPrinter/EscPosQRCode.swift" />
+        <source-file src="src/ios/Sources/ThermalPrinter/EscPosQueue.swift" />
         <source-file src="src/ios/Sources/ThermalPrinter/EscPosTcpConnection.swift" />
         <source-file src="src/ios/Sources/ThermalPrinter/PrinterTextParser.swift" />
         <source-file src="src/ios/Sources/ThermalPrinter/ThermalPrinterService.swift" />
+        <resource-file src="src/ios/ThermalPrinterCordovaPlugin.bundle" />
 
         <framework src="CoreBluetooth.framework" />
         <framework src="CoreImage.framework" />
