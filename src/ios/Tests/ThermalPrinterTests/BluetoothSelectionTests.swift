@@ -17,24 +17,44 @@ final class BluetoothSelectionTests: XCTestCase {
             service("FFF0", [("FFF1", [.write])]),
             service("18F0", [("2AF0", [.notify]), ("2AF1", [.write, .writeWithoutResponse])]),
         ]
-        let (characteristic, type) = try XCTUnwrap(EscPosBluetoothConnection.selectCharacteristic(in: services))
+        let (characteristic, type) = try XCTUnwrap(EscPosBluetoothRules.selectCharacteristic(in: services))
         XCTAssertEqual(characteristic.uuid, CBUUID(string: "2AF1"))
         XCTAssertEqual(type, .withoutResponse)
     }
 
-    func testFallsBackToAWritableCharacteristicInAPrinterService() throws {
+    func testFallsBackToAWritableCharacteristicInAKnownPrinterService() throws {
         let services = [service("E7810A71-73AE-499D-8C15-FAA9AEF0C3F2", [("BEF8D6C9-9C21-4C9E-B632-BD58C1009F9E", [.write])])]
-        let (characteristic, type) = try XCTUnwrap(EscPosBluetoothConnection.selectCharacteristic(in: services))
+        let (characteristic, type) = try XCTUnwrap(EscPosBluetoothRules.selectCharacteristic(in: services))
         XCTAssertEqual(characteristic.uuid, CBUUID(string: "BEF8D6C9-9C21-4C9E-B632-BD58C1009F9E"))
         XCTAssertEqual(type, .withResponse)
     }
 
-    func testUsesAnyVendorServiceButNotStandardOnes() throws {
-        let vendor = [service("1800", [("2A00", [.write])]), service("ABCD", [("ABCE", [.writeWithoutResponse])])]
-        XCTAssertEqual(try XCTUnwrap(EscPosBluetoothConnection.selectCharacteristic(in: vendor)).0.uuid, CBUUID(string: "ABCE"))
+    func testUsesAVendorCharacteristicOnlyWhenItIsTheOnlyWritableOne() throws {
+        let single = [service("1800", [("2A00", [.write])]), service("ABCD", [("ABCE", [.writeWithoutResponse]), ("ABCF", [.notify])])]
+        XCTAssertEqual(try XCTUnwrap(EscPosBluetoothRules.selectCharacteristic(in: single)).0.uuid, CBUUID(string: "ABCE"))
+
+        let ambiguous = [service("ABCD", [("ABCE", [.writeWithoutResponse])]), service("DCBA", [("DCBB", [.write])])]
+        XCTAssertNil(EscPosBluetoothRules.selectCharacteristic(in: ambiguous))
 
         let standardOnly = [service("1800", [("2A00", [.write])]), service("180A", [("2A29", [.read])])]
-        XCTAssertNil(EscPosBluetoothConnection.selectCharacteristic(in: standardOnly))
+        XCTAssertNil(EscPosBluetoothRules.selectCharacteristic(in: standardOnly))
+    }
+
+    func testListsDevicesAdvertisingAPrinterServiceOrAPrinterName() {
+        XCTAssertTrue(EscPosBluetoothRules.isPrinterCandidate(name: nil, advertisedServices: [CBUUID(string: "18F0")], connectable: nil))
+        XCTAssertTrue(EscPosBluetoothRules.isPrinterCandidate(name: "Galaxy Buds", advertisedServices: [CBUUID(string: "E7810A71-73AE-499D-8C15-FAA9AEF0C3F2")], connectable: true))
+        XCTAssertTrue(EscPosBluetoothRules.isPrinterCandidate(name: "Printer001", advertisedServices: [], connectable: true))
+        XCTAssertTrue(EscPosBluetoothRules.isPrinterCandidate(name: "MPT-II", advertisedServices: [], connectable: nil))
+        XCTAssertTrue(EscPosBluetoothRules.isPrinterCandidate(name: "RPP02N", advertisedServices: [], connectable: true))
+        XCTAssertTrue(EscPosBluetoothRules.isPrinterCandidate(name: "Thermal 58", advertisedServices: [], connectable: true))
+    }
+
+    func testSkipsUnrelatedNamedDevices() {
+        XCTAssertFalse(EscPosBluetoothRules.isPrinterCandidate(name: "[TV] Samsung 7 Series", advertisedServices: [], connectable: true))
+        XCTAssertFalse(EscPosBluetoothRules.isPrinterCandidate(name: "Apple Watch", advertisedServices: [CBUUID(string: "180D")], connectable: true))
+        XCTAssertFalse(EscPosBluetoothRules.isPrinterCandidate(name: "JBL Flip 6", advertisedServices: [], connectable: true))
+        XCTAssertFalse(EscPosBluetoothRules.isPrinterCandidate(name: nil, advertisedServices: [], connectable: true))
+        XCTAssertFalse(EscPosBluetoothRules.isPrinterCandidate(name: "Printer001", advertisedServices: [CBUUID(string: "18F0")], connectable: false))
     }
 }
 
