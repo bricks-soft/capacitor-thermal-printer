@@ -46,6 +46,7 @@
         <source-file src="src/ios/Sources/ThermalPrinter/EscPosBluetoothConnection.swift" />
         <source-file src="src/ios/Sources/ThermalPrinter/EscPosBluetoothRules.swift" />
         <source-file src="src/ios/Sources/ThermalPrinter/EscPosCharsetEncoding.swift" />
+        <source-file src="src/ios/Sources/ThermalPrinter/EscPosCoreBluetoothLink.swift" />
         <source-file src="src/ios/Sources/ThermalPrinter/EscPosDeviceConnection.swift" />
         <source-file src="src/ios/Sources/ThermalPrinter/EscPosJavaCompat.swift" />
         <source-file src="src/ios/Sources/ThermalPrinter/EscPosKnownPrinterStore.swift" />
