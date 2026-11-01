@@ -3,7 +3,63 @@ import Network
 
 final class EscPosTcpConnection: EscPosDeviceConnection {
     static var connectTimeout: TimeInterval = 5
+    static var localNetworkPermissionTimeout: TimeInterval = 60
     static var sendTimeout: TimeInterval = 30
+    static let localNetworkPolicyDenied: Int32 = -65570
+
+    enum WaitingDisposition: Equatable {
+        case awaitLocalNetworkPermission
+        case fail
+    }
+
+    static func waitingDisposition(for error: NWError, unsatisfiedReason: NWPath.UnsatisfiedReason?) -> WaitingDisposition {
+        if unsatisfiedReason == .localNetworkDenied {
+            return .awaitLocalNetworkPermission
+        }
+        if case .dns(let code) = error, code == localNetworkPolicyDenied {
+            return .awaitLocalNetworkPermission
+        }
+        return .fail
+    }
+
+    private final class ConnectProgress {
+        private let lock = NSLock()
+        private let semaphore = DispatchSemaphore(value: 0)
+        private var settled = false
+        private var permissionPending = false
+
+        var isSettled: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return settled
+        }
+
+        var isPermissionPending: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return permissionPending
+        }
+
+        func settle() {
+            lock.lock()
+            let first = !settled
+            settled = true
+            lock.unlock()
+            if first {
+                semaphore.signal()
+            }
+        }
+
+        func markPermissionPending() {
+            lock.lock()
+            permissionPending = true
+            lock.unlock()
+        }
+
+        func wait(_ seconds: TimeInterval) -> DispatchTimeoutResult {
+            semaphore.wait(timeout: .now() + seconds)
+        }
+    }
 
     let address: String
     let port: Int
@@ -38,12 +94,10 @@ final class EscPosTcpConnection: EscPosDeviceConnection {
         disconnect()
 
         let tcp = NWProtocolTCP.Options()
-        tcp.connectionTimeout = max(1, Int(EscPosTcpConnection.connectTimeout.rounded(.up)))
         tcp.noDelay = true
         let parameters = NWParameters(tls: nil, tcp: tcp)
         let candidate = NWConnection(host: NWEndpoint.Host(address), port: endpointPort, using: parameters)
-        let settled = DispatchSemaphore(value: 0)
-        var didSettle = false
+        let progress = ConnectProgress()
 
         candidate.stateUpdateHandler = { [weak self] state in
             guard let self = self else { return }
@@ -52,16 +106,17 @@ final class EscPosTcpConnection: EscPosDeviceConnection {
                 self.lock.lock()
                 self.ready = true
                 self.lock.unlock()
-                if !didSettle {
-                    didSettle = true
-                    settled.signal()
+                progress.settle()
+            case .waiting(let error):
+                if EscPosTcpConnection.waitingDisposition(for: error, unsatisfiedReason: candidate.currentPath?.unsatisfiedReason) == .awaitLocalNetworkPermission {
+                    progress.markPermissionPending()
+                } else {
+                    self.markClosed(candidate)
+                    progress.settle()
                 }
-            case .failed, .cancelled, .waiting:
+            case .failed, .cancelled:
                 self.markClosed(candidate)
-                if !didSettle {
-                    didSettle = true
-                    settled.signal()
-                }
+                progress.settle()
             default:
                 break
             }
@@ -74,8 +129,16 @@ final class EscPosTcpConnection: EscPosDeviceConnection {
 
         candidate.start(queue: queue)
 
-        let result = settled.wait(timeout: .now() + EscPosTcpConnection.connectTimeout)
-        if result == .timedOut || !isConnected {
+        let started = Date()
+        while !progress.isSettled {
+            let limit = progress.isPermissionPending ? EscPosTcpConnection.localNetworkPermissionTimeout : EscPosTcpConnection.connectTimeout
+            let remaining = started.addingTimeInterval(limit).timeIntervalSinceNow
+            if remaining <= 0 {
+                break
+            }
+            _ = progress.wait(min(remaining, 0.25))
+        }
+        if !isConnected {
             disconnect()
             throw EscPosError.connection("Unable to connect to TCP device.")
         }
