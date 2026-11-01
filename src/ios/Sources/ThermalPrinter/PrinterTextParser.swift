@@ -142,7 +142,7 @@ final class PrinterTextParserColumn {
         JavaString(String(repeating: " ", count: max(0, count)))
     }
 
-    let textParserLine: PrinterTextParserLine
+    unowned let textParserLine: PrinterTextParserLine
     private(set) var elements: [PrinterTextParserElement] = []
 
     init(textParserLine: PrinterTextParserLine, textColumn input: JavaString) throws {
@@ -617,6 +617,6 @@ final class PrinterTextParserBarcode: PrinterTextParserElement {
     }
 
     func print(_ printerSocket: EscPosPrinterCommands) throws {
-        printerSocket.setAlign(align).printBarcode(barcode)
+        try printerSocket.setAlign(align).printBarcode(barcode)
     }
 }
