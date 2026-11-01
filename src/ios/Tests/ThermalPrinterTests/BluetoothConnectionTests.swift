@@ -122,24 +122,55 @@ final class BluetoothConnectionTests: XCTestCase {
         XCTAssertEqual(connected, 2)
     }
 
-    func testLateAcknowledgementCannotCompleteTheNextOperation() throws {
+    private func reproduceStaleAcknowledgement(honorsDisconnectBoundary: Bool) throws -> (EscPosBluetoothConnection, TimeInterval, Error?) {
         link.configure {
             $0.discoverBehavior = .found(.withResponse)
-            $0.writeResponses = [.late(0.5)]
+            $0.writeResponses = [.late(0.35), .never]
+            $0.honorsDisconnectBoundary = honorsDisconnectBoundary
         }
-        let connection = makeConnection(EscPosBluetoothTimeouts(connect: 3, discovery: 1, write: 0.2))
+        let connection = makeConnection(EscPosBluetoothTimeouts(connect: 1, discovery: 1, write: 0.2))
         try connection.connect()
-        XCTAssertThrowsError(try send(payload(10), over: connection)) { error in
-            XCTAssertEqual((error as? EscPosError)?.message, "Timed out while waiting for the Bluetooth device.")
+        XCTAssertThrowsError(try send(payload(10), over: connection))
+        try connection.connect()
+        let started = Date()
+        var secondError: Error?
+        do {
+            try send(payload(10, seed: 3), over: connection)
+        } catch {
+            secondError = error
         }
-        let writesBeforeRetry = link.snapshot().writes.count
+        return (connection, Date().timeIntervalSince(started), secondError)
+    }
 
-        link.configure { $0.connectBehavior = .succeed(after: 0.8) }
+    func testStaleAcknowledgementCannotCompleteANewerWrite() throws {
+        let (connection, elapsed, error) = try reproduceStaleAcknowledgement(honorsDisconnectBoundary: true)
+        XCTAssertEqual((error as? EscPosError)?.message, "Timed out while waiting for the Bluetooth device.")
+        XCTAssertGreaterThanOrEqual(elapsed, 0.19)
+        XCTAssertEqual(link.snapshot().dropped, 1, "the link drops the old acknowledgement after didDisconnect")
+        XCTAssertFalse(connection.isConnected)
+    }
+
+    func testStaleAcknowledgementDeliveredAfterReconnectIsIgnoredByToken() throws {
+        let (connection, elapsed, error) = try reproduceStaleAcknowledgement(honorsDisconnectBoundary: false)
+        XCTAssertEqual((error as? EscPosError)?.message, "Timed out while waiting for the Bluetooth device.")
+        XCTAssertGreaterThanOrEqual(elapsed, 0.19)
+        XCTAssertGreaterThanOrEqual(connection.ignoredCallbackCount, 1)
+    }
+
+    func testAcknowledgementBeforeTheDisconnectCallbackIsIgnored() throws {
+        link.configure {
+            $0.discoverBehavior = .found(.withResponse)
+            $0.writeResponses = [.late(0.3)]
+            $0.cancelDisconnectDelay = 0.4
+        }
+        let connection = makeConnection(EscPosBluetoothTimeouts(connect: 2, discovery: 1, write: 0.2))
+        try connection.connect()
+        XCTAssertThrowsError(try send(payload(10), over: connection))
+        let writesBeforeRetry = link.snapshot().writes.count
         let started = Date()
         try connection.connect()
-        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(started), 0.7, "the late acknowledgement at 0.5 s must not finish the reconnect")
-        XCTAssertGreaterThanOrEqual(connection.ignoredCallbackCount, 2, "the late write acknowledgement and the cancelled link's disconnect are ignored")
-
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(started), 0.3, "reconnecting waits for the cancelled link's didDisconnect")
+        XCTAssertGreaterThanOrEqual(connection.ignoredCallbackCount, 2, "the old acknowledgement and the old disconnect are ignored")
         let retry = payload(25, seed: 4)
         try send(retry, over: connection)
         XCTAssertEqual(link.writtenBytes(from: writesBeforeRetry), retry)
@@ -158,13 +189,30 @@ final class BluetoothConnectionTests: XCTestCase {
         XCTAssertEqual(connected, 0)
     }
 
-    func testLateConnectionAfterTimeoutIsIgnored() throws {
+    func testInvalidationCancelsAPendingConnection() throws {
         link.configure { $0.connectBehavior = .succeed(after: 0.5) }
         let connection = makeConnection(EscPosBluetoothTimeouts(connect: 0.2, discovery: 1, write: 1))
         XCTAssertThrowsError(try connection.connect())
         Thread.sleep(forTimeInterval: 0.6)
-        XCTAssertEqual(connection.ignoredCallbackCount, 1)
+        XCTAssertFalse(link.connected, "the cancelled connection attempt never completes")
         XCTAssertFalse(connection.isConnected)
+        link.configure { $0.connectBehavior = .succeed(after: 0.01) }
+        try connection.connect()
+        XCTAssertTrue(connection.isConnected)
+    }
+
+    func testLateConnectionFromACancelledAttemptCannotFinishANewConnect() throws {
+        link.configure {
+            $0.connectBehavior = .succeed(after: 0.35)
+            $0.cancelsPendingConnect = false
+            $0.honorsDisconnectBoundary = false
+        }
+        let connection = makeConnection(EscPosBluetoothTimeouts(connect: 0.2, discovery: 1, write: 1))
+        XCTAssertThrowsError(try connection.connect())
+        link.configure { $0.connectBehavior = .never }
+        XCTAssertThrowsError(try connection.connect(), "the old attempt's didConnect must not finish the new connect")
+        XCTAssertFalse(connection.isConnected)
+        XCTAssertGreaterThanOrEqual(connection.ignoredCallbackCount, 1)
     }
 
     func testDiscoveryTimeoutInvalidatesTheLink() throws {
@@ -175,6 +223,19 @@ final class BluetoothConnectionTests: XCTestCase {
         }
         XCTAssertEqual(link.snapshot().cancelCalls, 1)
         XCTAssertFalse(connection.isConnected)
+    }
+
+    func testLateDiscoveryFromACancelledAttemptCannotFinishANewDiscovery() throws {
+        link.configure {
+            $0.discoverBehavior = .late(0.35, .withoutResponse)
+            $0.honorsDisconnectBoundary = false
+        }
+        let connection = makeConnection(EscPosBluetoothTimeouts(connect: 1, discovery: 0.2, write: 1))
+        XCTAssertThrowsError(try connection.connect())
+        link.configure { $0.discoverBehavior = .never }
+        XCTAssertThrowsError(try connection.connect(), "the old attempt's discovery must not finish the new one")
+        XCTAssertFalse(connection.isConnected)
+        XCTAssertGreaterThanOrEqual(connection.ignoredCallbackCount, 1)
     }
 
     func testDeviceWithoutAPrinterCharacteristicIsRejected() throws {
@@ -233,9 +294,12 @@ final class BluetoothConnectionTests: XCTestCase {
             return PrinterTextParserImg.bitmapToHexadecimalString(printer, bitmap)
         }
         let firstSegmentChunks = (2 + hexImages[0].count / 2 + 19) / 20
-        link.configure { $0.disconnectAfterWrites = firstSegmentChunks }
+        link.configure {
+            $0.disconnectAfterWrites = firstSegmentChunks
+            $0.disconnectDelay = 0.3
+        }
         XCTAssertThrowsError(try printer.printFormattedText(Fixtures.appReceiptText(hexImages: hexImages), dotsFeedPaper: 1)) { error in
-            XCTAssertEqual((error as? EscPosError)?.kind, .connection)
+            XCTAssertEqual((error as? EscPosError)?.message, "Unable to send data to device.", "the link drops while the first segment's pause runs")
         }
         XCTAssertEqual(link.snapshot().writes.count, firstSegmentChunks)
         XCTAssertTrue(connection.data.isEmpty)
@@ -253,7 +317,7 @@ final class BluetoothAuthorizationTests: XCTestCase {
         savedScanDuration = EscPosBluetoothCentral.scanDuration
         EscPosBluetoothCentral.authorizationTimeout = 2
         EscPosBluetoothCentral.stateTimeout = 2
-        EscPosBluetoothCentral.scanDuration = 0.2
+        EscPosBluetoothCentral.scanDuration = 0.3
     }
 
     override func tearDown() {
@@ -262,10 +326,16 @@ final class BluetoothAuthorizationTests: XCTestCase {
         EscPosBluetoothCentral.scanDuration = savedScanDuration
     }
 
-    private func makeService(authorization: LockedValue<CBManagerAuthorization>, manager: FakeCentralManager, managersMade: LockedValue<Int>) -> (ThermalPrinterService, EscPosBluetoothCentral) {
-        let defaults = UserDefaults(suiteName: "thermal-printer-tests-\(UUID().uuidString)")!
-        let central = EscPosBluetoothCentral(authorization: { authorization.value }, defaults: defaults) { _ in
+    static func temporaryStore() -> EscPosKnownPrinterStore {
+        EscPosKnownPrinterStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("thermal-printer-tests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("known.json"))
+    }
+
+    static func makeService(authorization: LockedValue<CBManagerAuthorization>, manager: FakeCentralManager, managersMade: LockedValue<Int>) -> (ThermalPrinterService, EscPosBluetoothCentral) {
+        let central = EscPosBluetoothCentral(authorization: { authorization.value }, store: temporaryStore()) { central in
             managersMade.value += 1
+            manager.central = central
             return manager
         }
         return (ThermalPrinterService(makeBluetoothCentral: { central }), central)
@@ -275,7 +345,7 @@ final class BluetoothAuthorizationTests: XCTestCase {
         let authorization = LockedValue(CBManagerAuthorization.notDetermined)
         let manager = FakeCentralManager(state: .unknown)
         let made = LockedValue(0)
-        let (service, central) = makeService(authorization: authorization, manager: manager, managersMade: made)
+        let (service, central) = Self.makeService(authorization: authorization, manager: manager, managersMade: made)
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
             authorization.value = .allowedAlways
             manager.state = .poweredOn
@@ -290,8 +360,7 @@ final class BluetoothAuthorizationTests: XCTestCase {
     func testPromptAnsweredWithDenyRefusesPermission() {
         let authorization = LockedValue(CBManagerAuthorization.notDetermined)
         let manager = FakeCentralManager(state: .unknown)
-        let made = LockedValue(0)
-        let (service, central) = makeService(authorization: authorization, manager: manager, managersMade: made)
+        let (service, central) = Self.makeService(authorization: authorization, manager: manager, managersMade: LockedValue(0))
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
             authorization.value = .denied
             manager.state = .unauthorized
@@ -304,7 +373,7 @@ final class BluetoothAuthorizationTests: XCTestCase {
 
     func testRestrictedAccessIsRefusedWithoutPrompting() {
         let made = LockedValue(0)
-        let (service, _) = makeService(authorization: LockedValue(.restricted), manager: FakeCentralManager(state: .unauthorized), managersMade: made)
+        let (service, _) = Self.makeService(authorization: LockedValue(.restricted), manager: FakeCentralManager(state: .unauthorized), managersMade: made)
         let result = service.run("requestBTPermissions", [["type": "bluetooth"]])
         guard case .error(let value) = result else { return XCTFail("\(result)") }
         XCTAssertEqual(value as? [String: Bool], ["granted": false])
@@ -313,7 +382,7 @@ final class BluetoothAuthorizationTests: XCTestCase {
 
     func testUnansweredPromptTimesOut() {
         EscPosBluetoothCentral.authorizationTimeout = 0.5
-        let (service, _) = makeService(authorization: LockedValue(.notDetermined), manager: FakeCentralManager(state: .unknown), managersMade: LockedValue(0))
+        let (service, _) = Self.makeService(authorization: LockedValue(.notDetermined), manager: FakeCentralManager(state: .unknown), managersMade: LockedValue(0))
         let started = Date()
         let result = service.run("requestBTPermissions", [["type": "bluetooth"]])
         guard case .error(let value) = result else { return XCTFail("\(result)") }
@@ -329,7 +398,7 @@ final class BluetoothAuthorizationTests: XCTestCase {
             (.denied, .unauthorized, "Missing permission for Bluetooth!"),
         ]
         for (authorization, state, message) in cases {
-            let (service, _) = makeService(authorization: LockedValue(authorization), manager: FakeCentralManager(state: state), managersMade: LockedValue(0))
+            let (service, _) = Self.makeService(authorization: LockedValue(authorization), manager: FakeCentralManager(state: state), managersMade: LockedValue(0))
             let result = service.run("listPrinters", [["type": "bluetooth"]])
             guard case .error(let value) = result else {
                 XCTFail("\(state.rawValue): \(result)")
@@ -341,7 +410,7 @@ final class BluetoothAuthorizationTests: XCTestCase {
 
     func testListingWaitsForBluetoothToPowerOn() {
         let manager = FakeCentralManager(state: .unknown)
-        let (service, central) = makeService(authorization: LockedValue(.allowedAlways), manager: manager, managersMade: LockedValue(0))
+        let (service, central) = Self.makeService(authorization: LockedValue(.allowedAlways), manager: manager, managersMade: LockedValue(0))
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
             manager.state = .poweredOn
             central.handleStateUpdate()
@@ -350,5 +419,95 @@ final class BluetoothAuthorizationTests: XCTestCase {
         guard case .success(let value) = result else { return XCTFail("\(result)") }
         XCTAssertEqual((value as? [[String: Any]])?.count, 0)
         XCTAssertEqual(manager.scans, 1)
+    }
+}
+
+final class BluetoothDiscoveryTests: XCTestCase {
+    private var savedScanDuration: TimeInterval = 0
+
+    override func setUp() {
+        savedScanDuration = EscPosBluetoothCentral.scanDuration
+        EscPosBluetoothCentral.scanDuration = 0.4
+    }
+
+    override func tearDown() {
+        EscPosBluetoothCentral.scanDuration = savedScanDuration
+    }
+
+    private func advertisement(name: String? = nil, services: [String] = [], connectable: Bool? = true) -> [String: Any] {
+        var data: [String: Any] = [:]
+        if let name = name {
+            data[CBAdvertisementDataLocalNameKey] = name
+        }
+        if !services.isEmpty {
+            data[CBAdvertisementDataServiceUUIDsKey] = services.map { CBUUID(string: $0) }
+        }
+        if let connectable = connectable {
+            data[CBAdvertisementDataIsConnectable] = NSNumber(value: connectable)
+        }
+        return data
+    }
+
+    func testListPrintersAppliesTheDiscoveryRuleToScanResults() throws {
+        let unnamedPrinter = FakePeripheral(name: nil)
+        let namedPrinter = FakePeripheral(name: nil)
+        let peripheralNamedPrinter = FakePeripheral(name: "MPT-II")
+        let manager = FakeCentralManager(state: .poweredOn)
+        manager.advertisements = [
+            (unnamedPrinter, advertisement(services: ["18F0"])),
+            (namedPrinter, advertisement(name: "Printer001")),
+            (peripheralNamedPrinter, advertisement()),
+            (FakePeripheral(name: "JBL Flip 6"), advertisement(name: "JBL Flip 6", services: ["FE07"])),
+            (FakePeripheral(name: nil), advertisement()),
+            (FakePeripheral(name: nil), advertisement(name: "RPP02N", services: ["18F0"], connectable: false)),
+        ]
+        let (service, _) = BluetoothAuthorizationTests.makeService(authorization: LockedValue(.allowedAlways), manager: manager, managersMade: LockedValue(0))
+
+        let result = service.run("listPrinters", [["type": "bluetooth"]])
+        guard case .success(let value) = result, let printers = value as? [[String: Any]] else {
+            return XCTFail("\(result)")
+        }
+        let listed = Dictionary(uniqueKeysWithValues: printers.map { ($0["address"] as? String ?? "", $0["name"] as? String ?? "") })
+        XCTAssertEqual(listed.count, 3)
+        XCTAssertEqual(listed[unnamedPrinter.identifier.uuidString], "BLE Printer \(unnamedPrinter.identifier.uuidString.prefix(4))")
+        XCTAssertEqual(listed[namedPrinter.identifier.uuidString], "Printer001")
+        XCTAssertEqual(listed[peripheralNamedPrinter.identifier.uuidString], "MPT-II")
+        XCTAssertTrue(printers.allSatisfy { !($0["name"] as? String ?? "").isEmpty }, "every listed device has a name")
+        let unnamedEntry = try XCTUnwrap(printers.first { $0["address"] as? String == unnamedPrinter.identifier.uuidString })
+        XCTAssertEqual(unnamedEntry["features"] as? [String], ["18F0"])
+        XCTAssertEqual(unnamedEntry["type"] as? Int, 2)
+    }
+
+    func testFallbackLabelIsStableForAPeripheral() {
+        let identifier = UUID(uuidString: "0A1B2C3D-0000-0000-0000-000000000000")!
+        XCTAssertEqual(EscPosBluetoothCentral.fallbackName(for: identifier), "BLE Printer 0A1B")
+    }
+}
+
+final class KnownPrinterStoreTests: XCTestCase {
+    func testRemembersPrintersInAFile() throws {
+        let store = BluetoothAuthorizationTests.temporaryStore()
+        XCTAssertEqual(store.load(), [:])
+        let first = UUID()
+        let second = UUID()
+        store.remember(identifier: first, name: "Printer001")
+        store.remember(identifier: second, name: "MPT-II")
+        store.remember(identifier: first, name: "Printer001 renamed")
+        let reloaded = EscPosKnownPrinterStore(fileURL: store.fileURL)
+        XCTAssertEqual(reloaded.load(), [first.uuidString: "Printer001 renamed", second.uuidString: "MPT-II"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.fileURL.path))
+    }
+
+    func testUnreadableFileMeansNoKnownPrinters() throws {
+        let store = BluetoothAuthorizationTests.temporaryStore()
+        try FileManager.default.createDirectory(at: store.fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("not json".utf8).write(to: store.fileURL)
+        XCTAssertEqual(store.load(), [:])
+    }
+
+    func testDefaultLocationIsApplicationSupport() {
+        let url = EscPosKnownPrinterStore.applicationSupportFile()
+        XCTAssertTrue(url.path.contains("Application Support/ThermalPrinter/"))
+        XCTAssertEqual(url.lastPathComponent, "known-bluetooth-printers.json")
     }
 }

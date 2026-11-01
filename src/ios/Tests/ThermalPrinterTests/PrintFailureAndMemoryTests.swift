@@ -193,7 +193,93 @@ final class MemoryTests: XCTestCase {
     }
 }
 
+final class FakeNetworkConnection: EscPosNetworkConnection {
+    typealias Step = (after: TimeInterval, state: NWConnection.State, reason: NWPath.UnsatisfiedReason?)
+
+    var stateUpdateHandler: ((NWConnection.State) -> Void)?
+    private(set) var unsatisfiedReason: NWPath.UnsatisfiedReason?
+    private let script: [Step]
+    private let lock = NSLock()
+    private var cancels = 0
+    private var sentData = Data()
+    private var receiver: ((Bool, NWError?) -> Void)?
+    private var queue: DispatchQueue?
+
+    init(script: [Step]) {
+        self.script = script
+    }
+
+    var cancelCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancels
+    }
+
+    var sent: Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return sentData
+    }
+
+    func start(queue: DispatchQueue) {
+        self.queue = queue
+        for step in script {
+            queue.asyncAfter(deadline: .now() + step.after) { [weak self] in
+                guard let self = self else { return }
+                self.unsatisfiedReason = step.reason
+                self.stateUpdateHandler?(step.state)
+            }
+        }
+    }
+
+    func send(_ data: Data, completion: @escaping (NWError?) -> Void) {
+        lock.lock()
+        sentData.append(data)
+        lock.unlock()
+        queue?.async { completion(nil) }
+    }
+
+    func receive(completion: @escaping (Bool, NWError?) -> Void) {
+        lock.lock()
+        receiver = completion
+        lock.unlock()
+    }
+
+    func cancel() {
+        lock.lock()
+        cancels += 1
+        lock.unlock()
+    }
+
+    func closeFromPrinter() {
+        lock.lock()
+        let pending = receiver
+        receiver = nil
+        lock.unlock()
+        queue?.async { pending?(true, nil) }
+    }
+}
+
 final class TcpWaitingTests: XCTestCase {
+    private var savedConnectTimeout: TimeInterval = 0
+    private var savedPermissionTimeout: TimeInterval = 0
+
+    override func setUp() {
+        savedConnectTimeout = EscPosTcpConnection.connectTimeout
+        savedPermissionTimeout = EscPosTcpConnection.localNetworkPermissionTimeout
+    }
+
+    override func tearDown() {
+        EscPosTcpConnection.connectTimeout = savedConnectTimeout
+        EscPosTcpConnection.localNetworkPermissionTimeout = savedPermissionTimeout
+    }
+
+    private func makeConnection(_ fake: FakeNetworkConnection) -> EscPosTcpConnection {
+        let connection = EscPosTcpConnection(address: "192.168.1.50", port: 9100) { _, _ in fake }
+        connection.pacesSends = false
+        return connection
+    }
+
     func testLocalNetworkPermissionKeepsTheConnectionWaiting() {
         XCTAssertEqual(EscPosTcpConnection.waitingDisposition(for: .posix(.ECONNREFUSED), unsatisfiedReason: .localNetworkDenied), .awaitLocalNetworkPermission)
         XCTAssertEqual(EscPosTcpConnection.waitingDisposition(for: .dns(EscPosTcpConnection.localNetworkPolicyDenied), unsatisfiedReason: nil), .awaitLocalNetworkPermission)
@@ -205,10 +291,81 @@ final class TcpWaitingTests: XCTestCase {
         XCTAssertEqual(EscPosTcpConnection.waitingDisposition(for: .dns(-65554), unsatisfiedReason: nil), .fail)
     }
 
+    func testPermissionGrantedWhileWaitingConnects() throws {
+        EscPosTcpConnection.connectTimeout = 0.1
+        EscPosTcpConnection.localNetworkPermissionTimeout = 3
+        let fake = FakeNetworkConnection(script: [
+            (0.02, .preparing, nil),
+            (0.05, .waiting(.posix(.ECONNREFUSED)), .localNetworkDenied),
+            (0.5, .ready, nil),
+        ])
+        let connection = makeConnection(fake)
+        let started = Date()
+        try connection.connect()
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(started), 0.45)
+        XCTAssertTrue(connection.isConnected)
+        XCTAssertEqual(fake.cancelCount, 0)
+
+        connection.write([0x1B, 0x40])
+        try connection.send()
+        XCTAssertEqual([UInt8](fake.sent), [0x1B, 0x40])
+    }
+
+    func testPermissionWaitTimesOutAndCleansUp() {
+        EscPosTcpConnection.connectTimeout = 0.1
+        EscPosTcpConnection.localNetworkPermissionTimeout = 0.4
+        let fake = FakeNetworkConnection(script: [
+            (0.05, .waiting(.posix(.ECONNREFUSED)), .localNetworkDenied),
+            (0.8, .ready, nil),
+        ])
+        let connection = makeConnection(fake)
+        let started = Date()
+        XCTAssertThrowsError(try connection.connect()) { error in
+            XCTAssertEqual((error as? EscPosError)?.message, "Unable to connect to TCP device.")
+        }
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertGreaterThanOrEqual(elapsed, 0.35)
+        XCTAssertLessThan(elapsed, 0.75)
+        XCTAssertEqual(fake.cancelCount, 1)
+        XCTAssertNil(fake.stateUpdateHandler)
+        Thread.sleep(forTimeInterval: 0.6)
+        XCTAssertFalse(connection.isConnected, "a ready state after cleanup must not revive the connection")
+    }
+
+    func testOtherWaitingFailsWithoutWaitingForTheTimeout() {
+        EscPosTcpConnection.connectTimeout = 2
+        let fake = FakeNetworkConnection(script: [(0.05, .waiting(.posix(.ECONNREFUSED)), nil)])
+        let connection = makeConnection(fake)
+        let started = Date()
+        XCTAssertThrowsError(try connection.connect())
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.5)
+        XCTAssertEqual(fake.cancelCount, 1)
+    }
+
+    func testNoProgressFailsAtTheConnectTimeout() {
+        EscPosTcpConnection.connectTimeout = 0.3
+        let fake = FakeNetworkConnection(script: [(0.02, .preparing, nil)])
+        let connection = makeConnection(fake)
+        let started = Date()
+        XCTAssertThrowsError(try connection.connect())
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertGreaterThanOrEqual(elapsed, 0.28)
+        XCTAssertLessThan(elapsed, 1)
+        XCTAssertEqual(fake.cancelCount, 1)
+    }
+
+    func testPrinterClosingTheSocketMarksTheConnectionClosed() throws {
+        let fake = FakeNetworkConnection(script: [(0.01, .ready, nil)])
+        let connection = makeConnection(fake)
+        try connection.connect()
+        XCTAssertTrue(connection.isConnected)
+        fake.closeFromPrinter()
+        Thread.sleep(forTimeInterval: 0.1)
+        XCTAssertFalse(connection.isConnected)
+    }
+
     func testUnreachablePrinterFailsWithinTheConnectTimeout() {
-        let saved = EscPosTcpConnection.connectTimeout
         EscPosTcpConnection.connectTimeout = 1
-        defer { EscPosTcpConnection.connectTimeout = saved }
         let connection = EscPosTcpConnection(address: "192.0.2.1", port: 9100)
         let started = Date()
         XCTAssertThrowsError(try connection.connect()) { error in
