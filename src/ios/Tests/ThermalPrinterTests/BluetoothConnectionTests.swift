@@ -478,6 +478,56 @@ final class BluetoothDiscoveryTests: XCTestCase {
         XCTAssertEqual(unnamedEntry["type"] as? Int, 2)
     }
 
+    func testScanResponsePacketsCompleteTheListedPrinter() throws {
+        let printer = FakePeripheral(name: nil)
+        let serviceLater = FakePeripheral(name: nil)
+        let vendorLater = FakePeripheral(name: nil)
+        let vendorService = "7D9F0001-5F49-4D67-9C46-1E5A4B3F2C10"
+        let manager = FakeCentralManager(state: .poweredOn)
+        manager.advertisements = [
+            (printer, advertisement(services: ["18F0"])),
+            (serviceLater, advertisement(name: "SPP-R200III")),
+            (vendorLater, advertisement(name: "MPT-III")),
+            (printer, advertisement(name: "MPT-II")),
+            (serviceLater, advertisement(services: ["FF00"])),
+            (vendorLater, advertisement(services: [vendorService])),
+        ]
+        let (service, _) = BluetoothAuthorizationTests.makeService(authorization: LockedValue(.allowedAlways), manager: manager, managersMade: LockedValue(0))
+
+        let result = service.run("listPrinters", [["type": "bluetooth"]])
+        guard case .success(let value) = result, let printers = value as? [[String: Any]] else {
+            return XCTFail("\(result)")
+        }
+        XCTAssertEqual(printers.count, 3)
+        let listed = Dictionary(uniqueKeysWithValues: try printers.map { (try XCTUnwrap($0["address"] as? String), $0) })
+        let listedPrinter = try XCTUnwrap(listed[printer.identifier.uuidString])
+        XCTAssertEqual(listedPrinter["name"] as? String, "MPT-II", "the scan response name replaces the fallback label")
+        XCTAssertEqual(listedPrinter["features"] as? [String], ["18F0"], "services from earlier packets are kept")
+        let listedLater = try XCTUnwrap(listed[serviceLater.identifier.uuidString])
+        XCTAssertEqual(listedLater["name"] as? String, "SPP-R200III")
+        XCTAssertEqual(listedLater["features"] as? [String], ["FF00"], "a printer service in a later packet makes the device a candidate")
+        let listedVendor = try XCTUnwrap(listed[vendorLater.identifier.uuidString])
+        XCTAssertEqual(listedVendor["name"] as? String, "MPT-III")
+        XCTAssertEqual(listedVendor["features"] as? [String], [vendorService], "a device listed for its name stays listed when a later packet has only services")
+    }
+
+    func testNameSearchStopsWhenTheScanResponseCarriesTheName() {
+        let printer = FakePeripheral(name: nil)
+        let manager = FakeCentralManager(state: .poweredOn)
+        manager.advertisements = [
+            (printer, advertisement(services: ["18F0"])),
+            (printer, advertisement(name: "MPT-II", services: ["18F0"])),
+        ]
+        let (_, central) = BluetoothAuthorizationTests.makeService(authorization: LockedValue(.allowedAlways), manager: manager, managersMade: LockedValue(0))
+        XCTAssertEqual(central.waitForState(), .poweredOn)
+
+        let started = Date()
+        let found = central.scan(duration: 5) { $0.name == "MPT-II" }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2, "the scan ends as soon as the name arrives")
+        XCTAssertEqual(found.map(\.name), ["MPT-II"])
+        XCTAssertEqual(found.map(\.identifier), [printer.identifier])
+    }
+
     func testFallbackLabelIsStableForAPeripheral() {
         let identifier = UUID(uuidString: "0A1B2C3D-0000-0000-0000-000000000000")!
         XCTAssertEqual(EscPosBluetoothCentral.fallbackName(for: identifier), "BLE Printer 0A1B")

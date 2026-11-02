@@ -240,22 +240,31 @@ final class EscPosBluetoothCentral: NSObject, CBCentralManagerDelegate {
         if connectable == false {
             return
         }
-        let services = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
+        let index = scanResults.firstIndex { $0.identifier == peripheral.identifier }
+        let earlierServices = index.map { scanResults[$0].services } ?? []
+        let advertised = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
+        let services = earlierServices + advertised.filter { !earlierServices.contains($0) }
         let localName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
         let advertisedName = [localName, peripheral.name].compactMap { $0 }.first { !$0.isEmpty }
-        let isPrinterCandidate = EscPosBluetoothRules.isPrinterCandidate(name: advertisedName, advertisedServices: services, connectable: connectable)
+        let isPrinterCandidate = index.map { scanResults[$0].isPrinterCandidate } == true
+            || EscPosBluetoothRules.isPrinterCandidate(name: advertisedName, advertisedServices: services, connectable: connectable)
         guard advertisedName != nil || isPrinterCandidate else { return }
-        if displayNames[peripheral.identifier] == nil {
-            displayNames[peripheral.identifier] = advertisedName ?? EscPosBluetoothCentral.fallbackName(for: peripheral.identifier)
+        if let advertisedName = advertisedName {
+            displayNames[peripheral.identifier] = advertisedName
+        } else if displayNames[peripheral.identifier] == nil {
+            displayNames[peripheral.identifier] = EscPosBluetoothCentral.fallbackName(for: peripheral.identifier)
         }
-        guard !scanResults.contains(where: { $0.identifier == peripheral.identifier }) else { return }
         let device = EscPosBluetoothDevice(
             peripheral: peripheral,
             name: displayName(for: peripheral),
             services: services,
             isPrinterCandidate: isPrinterCandidate
         )
-        scanResults.append(device)
+        if let index = index {
+            scanResults[index] = device
+        } else {
+            scanResults.append(device)
+        }
         if let match = scanMatch, match(device) {
             scanEvent?.signal()
         }
