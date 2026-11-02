@@ -7,7 +7,7 @@ Pod::Spec.new do |s|
   s.license = package['license']
   s.homepage = package['homepage']
   s.author = package['author']
-  s.source = { :git => 'https://github.com/bricks-soft/capacitor-thermal-printer.git', :tag => s.version.to_s }
+  s.source = { :git => 'https://github.com/bricks-soft/capacitor-thermal-printer.git', :tag => 'v' + s.version.to_s }
   s.source_files = 'ios/Sources/ThermalPrinter/**/*.swift'
   s.ios.deployment_target = '15.0'
   s.module_name = 'ThermalPrinter'

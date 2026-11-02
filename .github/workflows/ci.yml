@@ -2,6 +2,9 @@ name: CI
 on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   javascript:
     runs-on: ubuntu-latest
@@ -33,7 +36,107 @@ jobs:
       - run: npm ci && npm ci --prefix example && cd example && npx cap sync android
       - run: cd example/android && ./gradlew :bricks-soft-capacitor-thermal-printer:testDebugUnitTest assembleDebug
   ios:
-    runs-on: macos-15
+    name: iOS XCTest (${{ matrix.label }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            runtime: ''
+            label: latest runtime
+          - runner: macos-15-intel
+            runtime: '16.4'
+            label: iOS 16.4
     steps:
       - uses: actions/checkout@v4
-      - run: xcodebuild test -scheme BricksSoftCapacitorThermalPrinter -destination 'platform=iOS Simulator,name=iPhone 16' -derivedDataPath build
+      - run: python3 .github/scripts/ios-simulator.py ${{ matrix.runtime }}
+      - run: |
+          set -o pipefail
+          xcodebuild test -scheme BricksSoftCapacitorThermalPrinter -destination "platform=iOS Simulator,id=$IOS_SIMULATOR" -derivedDataPath "$RUNNER_TEMP/dd" -resultBundlePath "$RUNNER_TEMP/xctest.xcresult" 2>&1 | tee "$RUNNER_TEMP/xctest.log"
+          grep -E "^[[:space:]]+Executed [0-9]+ tests" "$RUNNER_TEMP/xctest.log" | tail -1 | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: xctest-${{ matrix.runtime || 'latest' }}
+          path: |
+            ${{ runner.temp }}/xctest.log
+            ${{ runner.temp }}/xctest.xcresult
+  mutations:
+    name: Mutations (shard ${{ matrix.shard }}/3)
+    runs-on: macos-15-intel
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    env:
+      MUTATION_DERIVED_DATA: ${{ github.workspace }}/../dd-mutation
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 .github/scripts/ios-simulator.py
+      - run: python3 tests/mutation/run.py "$GITHUB_WORKSPACE" "$RUNNER_TEMP/mutation-work" "$RUNNER_TEMP/mutations" "$IOS_SIMULATOR" check
+      - name: A surviving mutant fails the runner
+        if: matrix.shard == 1
+        env:
+          MUTATIONS_MODULE: selftest_mutations
+        run: |
+          if python3 tests/mutation/run.py "$GITHUB_WORKSPACE" "$RUNNER_TEMP/mutation-work" "$RUNNER_TEMP/selftest" "$IOS_SIMULATOR"; then
+            echo "The runner passed with a surviving mutant"
+            exit 1
+          fi
+          grep -q '"status": "MISSED"' "$RUNNER_TEMP/selftest/summary.json"
+          grep -q '"status": "INFRA"' "$RUNNER_TEMP/selftest/summary.json"
+      - name: Run mutants
+        run: |
+          names=$(python3 -c 'import sys; sys.path.insert(0, "tests/mutation"); from mutations import MUTATIONS; print(",".join(m["name"] for i, m in enumerate(MUTATIONS) if i % 3 == int(sys.argv[1]) - 1))' ${{ matrix.shard }})
+          python3 tests/mutation/run.py "$GITHUB_WORKSPACE" "$RUNNER_TEMP/mutation-work" "$RUNNER_TEMP/mutations" "$IOS_SIMULATOR" "only=$names"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: mutations-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/mutations
+            ${{ runner.temp }}/selftest
+  ios-app:
+    name: iOS app (${{ matrix.manager }})
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        manager: [SPM, CocoaPods]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: python3 .github/scripts/ios-simulator.py
+      - run: node .github/scripts/ios-consumer.mjs ${{ matrix.manager }}
+      - name: Build for device and simulator
+        working-directory: ${{ runner.temp }}/ios-consumer/ios/App
+        run: |
+          if [ -d App.xcworkspace ]; then project="-workspace App.xcworkspace"; else project="-project App.xcodeproj"; fi
+          xcodebuild $project -scheme App -configuration Release -destination generic/platform=iOS -derivedDataPath "$RUNNER_TEMP/dd-device" build CODE_SIGNING_ALLOWED=NO
+          xcodebuild $project -scheme App -configuration Debug -destination "platform=iOS Simulator,id=$IOS_SIMULATOR" -derivedDataPath "$RUNNER_TEMP/dd-sim" build CODE_SIGNING_ALLOWED=NO
+      - name: Print the receipts over TCP and compare with the Android golden bytes
+        run: |
+          python3 .github/scripts/tcp-capture.py ios/Tests/ThermalPrinterTests/Fixtures/android-reference.json "$RUNNER_TEMP/capture" 300 > "$RUNNER_TEMP/capture.jsonl" &
+          capture=$!
+          for i in $(seq 60); do [ -f "$RUNNER_TEMP/capture/listening" ] && break; sleep 1; done
+          xcrun simctl install "$IOS_SIMULATOR" "$RUNNER_TEMP/dd-sim/Build/Products/Debug-iphonesimulator/App.app"
+          xcrun simctl launch "$IOS_SIMULATOR" com.brickssoft.thermalprinter.example
+          wait $capture
+          cat "$RUNNER_TEMP/capture.jsonl" | tee -a "$GITHUB_STEP_SUMMARY"
+      - if: ${{ !cancelled() }}
+        run: xcrun simctl io "$IOS_SIMULATOR" screenshot "$RUNNER_TEMP/capture/screen.png" || true
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: ios-app-${{ matrix.manager }}
+          path: |
+            ${{ runner.temp }}/capture
+            ${{ runner.temp }}/capture.jsonl

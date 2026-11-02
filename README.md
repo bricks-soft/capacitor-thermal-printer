@@ -9,7 +9,7 @@ npm install @bricks-soft/capacitor-thermal-printer
 npx cap sync
 ```
 
-Until 1.0.0 is on npm, install from GitHub pinned to a commit on `main`: `git+https://github.com/bricks-soft/capacitor-thermal-printer.git#<commit>`.
+Until 8.0.0 is on npm, install from GitHub pinned to a commit on `main`: `git+https://github.com/bricks-soft/capacitor-thermal-printer.git#<commit>`.
 
 Add `NSBluetoothAlwaysUsageDescription` to the iOS app's Info.plist. For TCP printers, also add `NSLocalNetworkUsageDescription`. CocoaPods and Swift Package Manager are supported. Minimums: iOS 15, Android API 24, Java 21.
 
@@ -53,10 +53,29 @@ cd android && ./gradlew :bricks-soft-capacitor-thermal-printer:testDebugUnitTest
 
 The Android tests drive the frozen old wrapper in `tests/android-parity/legacy` and the Capacitor wrapper against the same receipt images and golden bytes. The legacy wrapper is test-only and excluded from the npm package.
 
-On macOS run `xcodebuild test -scheme BricksSoftCapacitorThermalPrinter -destination 'platform=iOS Simulator,name=YOUR_SIMULATOR'`. Run `python3 tests/mutation/run.py REPO SCRATCH OUTPUT SIMULATOR_UDID` for the mutation checks. `tests/android-reference/generate.sh` regenerates golden fixtures from DantSu 3.2.1.
+On macOS run `xcodebuild test -scheme BricksSoftCapacitorThermalPrinter -destination 'platform=iOS Simulator,name=YOUR_SIMULATOR'`. Run `python3 tests/mutation/run.py REPO SCRATCH OUTPUT SIMULATOR_UDID` for the mutation checks. CI runs the same XCTest suite on the newest iOS runtime and on iOS 16.4, the mutation checks, and SPM and CocoaPods builds of the example app, which print both receipts over TCP on the simulator and compare the bytes with the Android golden receipts. `tests/android-reference/generate.sh` regenerates golden fixtures from DantSu 3.2.1.
 
 The example sends both reference receipts to a TCP capture at the `host` and `port` URL parameters (defaults `100.84.156.107:19100`), then checks paired Bluetooth listing. It does not exercise Bluetooth SPP printing or physical paper output.
 
 ## Publish
 
-Releases are tagged on `main`. With the `NODE_AUTH_TOKEN` repository secret set, push a tag `v<version>` matching package.json (`v1.0.0` for the first release). The publish workflow checks the tag, runs `npm ci` and `npm test`, and publishes the public package.
+The major version follows Capacitor (8). Publishing uses npm trusted publishing (OIDC, no npm token) with staged publishing, as in `bricks-soft/location-tracking`: creating a GitHub release runs [npm-publish.yml](.github/workflows/npm-publish.yml), which runs `npm test` and `npm stage publish`. A version that is already on npm is skipped.
+
+First version (8.0.0), once by hand, because a trusted publisher can only be added to an existing package. From a clean checkout of `main`, logged in as a member of the `@bricks-soft` npm org with 2FA:
+
+```sh
+npm ci && npm test
+npm publish
+```
+
+Then add the trusted publisher, stage-only like location-tracking: package **Settings** → **Trusted publishing** → **GitHub Actions**, organization `bricks-soft`, repository `capacitor-thermal-printer`, workflow `npm-publish.yml`, no environment, allow `npm stage publish` only. The CLI equivalent (npm 11.15 or newer):
+
+```sh
+npm trust github @bricks-soft/capacitor-thermal-printer --repo bricks-soft/capacitor-thermal-printer --file npm-publish.yml --allow-stage-publish
+```
+
+Each later release:
+
+1. Add the version's notes to `CHANGELOG.md` and run `npm version <version> --no-git-tag-version`; commit to `main`.
+2. Create the GitHub release `v<version>` on that commit with the CHANGELOG section as notes. The workflow stages the package.
+3. Approve it in the package's **Staged Packages** tab on npmjs.com (or `npm stage approve <stage-id>`) with 2FA.
