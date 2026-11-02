@@ -9,7 +9,7 @@ npm install @bricks-soft/capacitor-thermal-printer
 npx cap sync
 ```
 
-Version 1.0.0 is prepared for publication. Until it is published, install the `feat/capacitor` branch of `salemsayed/thermal-printer-cordova-plugin` pinned to its commit. The intended repository after transfer is `bricks-soft/capacitor-thermal-printer`.
+Until 1.0.0 is on npm, install from GitHub pinned to a commit on `main`: `git+https://github.com/bricks-soft/capacitor-thermal-printer.git#<commit>`.
 
 Add `NSBluetoothAlwaysUsageDescription` to the iOS app's Info.plist. For TCP printers, also add `NSLocalNetworkUsageDescription`. CocoaPods and Swift Package Manager are supported. Minimums: iOS 15, Android API 24, Java 21.
 
@@ -57,4 +57,6 @@ On macOS run `xcodebuild test -scheme BricksSoftCapacitorThermalPrinter -destina
 
 The example sends both reference receipts to a TCP capture at the `host` and `port` URL parameters (defaults `100.84.156.107:19100`), then checks paired Bluetooth listing. It does not exercise Bluetooth SPP printing or physical paper output.
 
-After the repository is transferred and renamed, Yasser can configure the `NODE_AUTH_TOKEN` repository secret and push `v1.0.0`. The publish workflow verifies that the tag matches package.json, builds, tests, and publishes the public package. No version has been published by this change.
+## Publish
+
+Releases are tagged on `main`. With the `NODE_AUTH_TOKEN` repository secret set, push a tag `v<version>` matching package.json (`v1.0.0` for the first release). The publish workflow checks the tag, runs `npm ci` and `npm test`, and publishes the public package.
