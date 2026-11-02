@@ -21,7 +21,7 @@ problems = []
 for m in MUTATIONS:
     if only and not any(m["name"].startswith(prefix) for prefix in only):
         continue
-    path = os.path.join(source, "src/ios", m["file"])
+    path = os.path.join(source, "ios", m["file"])
     text = open(path).read()
     count = text.count(m["old"])
     if count == 0 or (count > 1 and not m.get("all")):
@@ -33,12 +33,12 @@ for m in MUTATIONS:
         continue
     if os.path.exists(work):
         shutil.rmtree(work)
-    shutil.copytree(os.path.join(source, "src/ios"), work)
-    target = os.path.join(work, m["file"])
+    shutil.copytree(source, work, ignore=shutil.ignore_patterns(".git", "node_modules", ".build", ".swiftpm", "dist", "build", ".gradle"))
+    target = os.path.join(work, "ios", m["file"])
     original = open(target).read()
     with open(target, "w") as handle:
         handle.write(original.replace(m["old"], m["new"]))
-    args = ["xcodebuild", "test", "-scheme", "ThermalPrinter", "-destination", f"platform=iOS Simulator,id={udid}", "-derivedDataPath", derived_data]
+    args = ["xcodebuild", "test", "-scheme", "BricksSoftCapacitorThermalPrinter", "-destination", f"platform=iOS Simulator,id={udid}", "-derivedDataPath", derived_data]
     args += [f"-only-testing:{t}" for t in m["tests"]]
     result = subprocess.run(args, cwd=work, capture_output=True, text=True)
     log = result.stdout + result.stderr

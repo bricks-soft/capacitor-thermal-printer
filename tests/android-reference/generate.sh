@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Regenerates src/ios/Tests/ThermalPrinterTests/Fixtures/android-reference.json by running the
+# Regenerates ios/Tests/ThermalPrinterTests/Fixtures/android-reference.json by running the
 # DantSu ESC/POS library version the Android plugin uses (3.2.1) on the JVM with Bitmap stubs.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
-fixtures="$root/src/ios/Tests/ThermalPrinterTests/Fixtures"
+fixtures="$root/ios/Tests/ThermalPrinterTests/Fixtures"
 work="${WORK_DIR:-$(mktemp -d)}"
 
 dantsu_version="3.2.1"

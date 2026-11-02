@@ -1,0 +1,12 @@
+{
+  "name": "thermal-printer-example",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": { "sync": "cap sync android" },
+  "dependencies": {
+    "@bricks-soft/capacitor-thermal-printer": "file:..",
+    "@capacitor/core": "8.5.2",
+    "@capacitor/android": "8.5.2"
+  },
+  "devDependencies": { "@capacitor/cli": "8.5.2" }
+}

@@ -1,31 +1,63 @@
 {
-  "name": "thermal-printer-cordova-plugin",
-  "version": "1.1.0",
-  "description": "Cordova wrapper for ESC/POS Thermal Printer library",
+  "name": "@bricks-soft/capacitor-thermal-printer",
+  "version": "1.0.0",
+  "description": "ESC/POS receipt printing over Bluetooth, TCP and USB for Capacitor.",
+  "main": "dist/plugin.cjs.js",
+  "module": "dist/esm/index.js",
+  "types": "dist/esm/index.d.ts",
+  "unpkg": "dist/plugin.js",
+  "files": [
+    "android/src/main/",
+    "android/build.gradle",
+    "dist/",
+    "ios/Sources/",
+    "Package.swift",
+    "BricksSoftCapacitorThermalPrinter.podspec"
+  ],
+  "author": "Bricks Soft",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/paystory-de/thermal-printer-cordova-plugin.git"
+    "url": "git+https://github.com/bricks-soft/capacitor-thermal-printer.git"
   },
+  "bugs": {
+    "url": "https://github.com/bricks-soft/capacitor-thermal-printer/issues"
+  },
+  "homepage": "https://github.com/bricks-soft/capacitor-thermal-printer#readme",
   "keywords": [
-    "ecosystem:cordova",
-    "cordova-android",
-    "cordova-ios",
+    "capacitor",
+    "plugin",
     "thermal",
     "printer",
-    "cordova",
-    "plugin",
-    "esc",
-    "pos",
-    "esc/pos"
+    "escpos"
   ],
-  "author": {
-    "name": "Patrick Bußmann",
-    "email": "patrick.bussmann@paystory.de",
-    "url": "http://paystory.de/"
+  "scripts": {
+    "clean": "rimraf dist",
+    "build": "npm run clean && tsc && rollup -c rollup.config.mjs",
+    "test": "npm run build && node --test test/*.mjs",
+    "prepare": "npm run build"
   },
-  "license": "Apache-2.0",
-  "bugs": {
-    "url": "https://github.com/paystory-de/thermal-printer-cordova-plugin.git/issues"
+  "devDependencies": {
+    "@capacitor/core": "8.5.2",
+    "@capacitor/android": "8.5.2",
+    "@capacitor/cli": "8.5.2",
+    "@capacitor/ios": "8.5.2",
+    "rimraf": "^6.1.3",
+    "rollup": "^4.53.2",
+    "typescript": "~5.9.3"
   },
-  "homepage": "https://github.com/paystory-de/thermal-printer-cordova-plugin#readme"
+  "peerDependencies": {
+    "@capacitor/core": ">=8.0.0 <9.0.0"
+  },
+  "capacitor": {
+    "android": {
+      "src": "android"
+    },
+    "ios": {
+      "src": "ios"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

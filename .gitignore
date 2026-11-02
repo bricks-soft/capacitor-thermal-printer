@@ -1,7 +1,11 @@
-/.idea
-/node_modules
-/dist
-
-src/ios/.build/
-src/ios/.swiftpm/
+/node_modules/
+/dist/
+/.build/
+/.swiftpm/
+/android/build/
+/android/.gradle/
+/example/node_modules/
+/example/android/**/build/
+/example/android/.gradle/
+/example/android/local.properties
 __pycache__/
