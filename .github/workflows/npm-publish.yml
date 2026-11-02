@@ -21,6 +21,11 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org/
       - run: npm install -g npm@latest
+      - name: Release tag matches package.json
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: test "$TAG" = "v$(node -p 'require("./package.json").version')"
       - name: Skip a version that is already on npm
         id: published
         run: |
