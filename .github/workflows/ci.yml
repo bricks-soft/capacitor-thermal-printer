@@ -27,6 +27,9 @@ jobs:
           distribution: temurin
           java-version: 21
       - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
+          log-accepted-android-sdk-licenses: false
       - run: npm ci && npm ci --prefix example && cd example && npx cap sync android
       - run: cd example/android && ./gradlew :bricks-soft-capacitor-thermal-printer:testDebugUnitTest assembleDebug
   ios:
