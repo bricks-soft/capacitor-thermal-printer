@@ -128,7 +128,7 @@ final class EscPosBluetoothCentral: NSObject, CBCentralManagerDelegate {
             }
             guard let manager = manager, manager.state != .poweredOn else { return }
             for link in links.values {
-                link.handleDisconnected(nil)
+                link.handleUnavailable()
             }
         }
     }
@@ -222,18 +222,30 @@ final class EscPosBluetoothCentral: NSObject, CBCentralManagerDelegate {
         return scan(duration: EscPosBluetoothCentral.scanDuration).filter(\.isPrinterCandidate).compactMap { $0.peripheral as? CBPeripheral }
     }
 
+    var isPoweredOn: Bool {
+        queue.sync { manager?.state == .poweredOn }
+    }
+
     func connection(for peripheral: CBPeripheral) -> EscPosBluetoothConnection {
         queue.sync {
-            if let existing = connections[peripheral.identifier] {
-                return existing
+            if connections[peripheral.identifier] == nil {
+                linkedPeripherals[peripheral.identifier] = peripheral
             }
-            let link = EscPosCoreBluetoothLink(driver: EscPosCBPeripheralDriver(peripheral: peripheral, central: self))
-            links[peripheral.identifier] = link
-            linkedPeripherals[peripheral.identifier] = peripheral
-            let created = EscPosBluetoothConnection(link: link, queue: queue) { [weak self] in
+            return connection(for: peripheral.identifier, driver: EscPosCBPeripheralDriver(peripheral: peripheral, central: self)) { [weak self] in
                 self?.remember(peripheral)
             }
-            connections[peripheral.identifier] = created
+        }
+    }
+
+    func connection(for identifier: UUID, driver: @autoclosure () -> EscPosPeripheralDriver, onConnected: (() -> Void)? = nil) -> EscPosBluetoothConnection {
+        queue.sync {
+            if let existing = connections[identifier] {
+                return existing
+            }
+            let link = EscPosCoreBluetoothLink(driver: driver())
+            links[identifier] = link
+            let created = EscPosBluetoothConnection(link: link, queue: queue, onConnected: onConnected)
+            connections[identifier] = created
             return created
         }
     }

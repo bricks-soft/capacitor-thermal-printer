@@ -2,6 +2,7 @@ import CoreBluetooth
 import Foundation
 
 protocol EscPosPeripheralDriver: AnyObject {
+    var isAvailable: Bool { get }
     var isConnected: Bool { get }
     var canSendWriteWithoutResponse: Bool { get }
     var services: [CBService] { get }
@@ -22,6 +23,8 @@ final class EscPosCBPeripheralDriver: EscPosPeripheralDriver {
         self.peripheral = peripheral
         self.central = central
     }
+
+    var isAvailable: Bool { central.isPoweredOn }
 
     var isConnected: Bool { peripheral.state == .connected }
 
@@ -165,6 +168,30 @@ final class EscPosCoreBluetoothLink: NSObject, EscPosBluetoothLink, CBPeripheral
         events?.linkDidDisconnect(attempt: live, error: error)
     }
 
+    func handleUnavailable() {
+        let cancelled = closing
+        let live = session
+        let pending = pendingConnect
+        let queued = queuedConnect
+        resetSession()
+        closing = nil
+        pendingConnect = nil
+        queuedConnect = nil
+        guard let events = events else { return }
+        if let cancelled = cancelled {
+            events.linkDidDisconnect(attempt: cancelled, error: nil)
+        }
+        if let live = live {
+            events.linkDidDisconnect(attempt: live, error: nil)
+        }
+        if let pending = pending {
+            events.linkDidFailToConnect(attempt: pending, error: nil)
+        }
+        if let queued = queued {
+            events.linkDidFailToConnect(attempt: queued, error: nil)
+        }
+    }
+
     func handleServicesDiscovered(error: Error?) {
         guard session != nil, let attempt = pendingDiscovery else { return }
         if let error = error {
@@ -218,6 +245,10 @@ final class EscPosCoreBluetoothLink: NSObject, EscPosBluetoothLink, CBPeripheral
     }
 
     private func startConnecting(_ attempt: Int) {
+        guard driver.isAvailable else {
+            events?.linkDidFailToConnect(attempt: attempt, error: nil)
+            return
+        }
         pendingConnect = attempt
         driver.attach(self)
         driver.connect()

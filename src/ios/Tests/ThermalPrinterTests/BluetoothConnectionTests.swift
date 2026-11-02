@@ -533,6 +533,54 @@ final class BluetoothAuthorizationTests: XCTestCase {
     }
 }
 
+final class BluetoothPowerTests: XCTestCase {
+    func testTurningBluetoothOffFailsAPendingConnectAndAFreshConnectWorksAfterPowerOn() throws {
+        let manager = FakeCentralManager(state: .poweredOn)
+        let central = EscPosBluetoothCentral(authorization: { .allowedAlways }, store: BluetoothAuthorizationTests.temporaryStore()) { central in
+            manager.central = central
+            return manager
+        }
+        XCTAssertEqual(central.waitForState(), .poweredOn)
+        let driver = StubPeripheralDriver()
+        driver.services = StubPeripheralDriver.printerServices()
+        let connection = central.connection(for: UUID(), driver: driver)
+        let link = try XCTUnwrap(connection.link as? EscPosCoreBluetoothLink)
+        var answersConnect = false
+        driver.onConnect = {
+            guard answersConnect else { return }
+            central.queue.async(after: 0.05) {
+                driver.isConnected = true
+                link.handleConnected()
+            }
+        }
+        driver.onDiscoverServices = { central.queue.async { link.handleServicesDiscovered(error: nil) } }
+        driver.onDiscoverCharacteristics = { central.queue.async { link.handleCharacteristicsDiscovered() } }
+        connection.pacesSends = false
+
+        central.queue.async(after: 0.2) {
+            driver.isAvailable = false
+            manager.state = .poweredOff
+            central.handleStateUpdate()
+            central.handleStateUpdate()
+        }
+        let started = Date()
+        XCTAssertThrowsError(try connection.connect())
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2, "the pending connect fails when Bluetooth turns off, not at its 10-second timeout")
+        XCTAssertFalse(central.queue.sync { link.isCancelling })
+        XCTAssertEqual(central.queue.sync { driver.connectCalls }, 1)
+
+        central.queue.sync {
+            driver.isAvailable = true
+            manager.state = .poweredOn
+            answersConnect = true
+        }
+        central.handleStateUpdate()
+        try connection.connect()
+        XCTAssertTrue(connection.isConnected)
+        XCTAssertEqual(central.queue.sync { driver.connectCalls }, 2)
+    }
+}
+
 final class BluetoothDiscoveryTests: XCTestCase {
     private var savedScanDuration: TimeInterval = 0
 

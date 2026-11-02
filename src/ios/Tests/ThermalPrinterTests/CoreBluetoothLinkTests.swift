@@ -4,6 +4,7 @@ import Foundation
 import XCTest
 
 final class StubPeripheralDriver: EscPosPeripheralDriver {
+    var isAvailable = true
     var isConnected = false
     var canSendWriteWithoutResponse = true
     var services: [CBService] = []
@@ -246,6 +247,121 @@ final class CoreBluetoothLinkTests: XCTestCase {
         answersConnect = true
         try connection.connect()
         XCTAssertTrue(connection.isConnected)
+        XCTAssertEqual(queue.sync { driver.connectCalls }, 2)
+        connection.write([0x1B, 0x40])
+        try connection.send()
+        XCTAssertEqual(queue.sync { driver.writes.map(\.0) }, [Data([0x1B, 0x40])])
+    }
+
+    func testBluetoothOffDuringACancellationFailsTheQueuedConnectWithoutStartingIt() {
+        onQueue {
+            link.connect(attempt: 1)
+            link.cancel()
+            link.connect(attempt: 2)
+            driver.isAvailable = false
+            link.handleUnavailable()
+            XCTAssertEqual(events.log, ["disconnected 1", "failed 2"])
+            XCTAssertEqual(driver.connectCalls, 1, "nothing starts while Bluetooth is off")
+            XCTAssertFalse(link.isCancelling)
+
+            link.connect(attempt: 3)
+            XCTAssertEqual(events.log, ["disconnected 1", "failed 2", "failed 3"])
+            link.cancel()
+            link.handleUnavailable()
+            XCTAssertFalse(link.isCancelling, "a connect refused while off leaves nothing to cancel")
+            XCTAssertEqual(driver.connectCalls, 1)
+            XCTAssertEqual(events.log, ["disconnected 1", "failed 2", "failed 3"], "repeated off updates report nothing new")
+
+            driver.isAvailable = true
+            link.handleConnected()
+            link.handleDisconnected(nil)
+            link.handleFailedToConnect(nil)
+            link.handleWriteResponse(error: nil)
+            link.handleReadyToSend()
+            XCTAssertEqual(events.log, ["disconnected 1", "failed 2", "failed 3"], "late callbacks after power-on are ignored")
+
+            link.connect(attempt: 4)
+            XCTAssertEqual(driver.connectCalls, 2)
+            link.handleDisconnected(nil)
+            driver.isConnected = true
+            link.handleConnected()
+            XCTAssertEqual(events.log, ["disconnected 1", "failed 2", "failed 3", "connected 4"])
+        }
+    }
+
+    func testBluetoothOffFailsAPendingConnect() {
+        onQueue {
+            link.connect(attempt: 1)
+            driver.isAvailable = false
+            link.handleUnavailable()
+            XCTAssertEqual(events.log, ["failed 1"])
+            link.cancel()
+            XCTAssertFalse(link.isCancelling)
+            driver.isAvailable = true
+            link.connect(attempt: 2)
+            XCTAssertEqual(driver.connectCalls, 2)
+            driver.isConnected = true
+            link.handleConnected()
+            XCTAssertEqual(events.log, ["failed 1", "connected 2"])
+        }
+    }
+
+    func testBluetoothOffEndsALiveSession() {
+        onQueue {
+            driver.services = StubPeripheralDriver.printerServices([.write])
+            link.connect(attempt: 1)
+            driver.isConnected = true
+            link.handleConnected()
+            link.discoverPrinterCharacteristic(attempt: 1)
+            link.handleServicesDiscovered(error: nil)
+            link.handleCharacteristicsDiscovered()
+            link.write(Data([1]), type: .withResponse, token: 7)
+            driver.isConnected = false
+            driver.isAvailable = false
+            link.handleUnavailable()
+            link.handleWriteResponse(error: nil)
+            XCTAssertEqual(events.log, ["connected 1", "discovered 1 withResponse", "disconnected 1"])
+            XCTAssertFalse(link.isCancelling)
+        }
+    }
+
+    func testConnectQueuedBehindACancellationFailsWhenBluetoothTurnsOffAndAFreshConnectWorksAfterPowerOn() throws {
+        let central = queue!
+        driver.services = StubPeripheralDriver.printerServices()
+        var answersConnect = false
+        driver.onConnect = { [unowned self] in
+            guard answersConnect else { return }
+            central.async(after: 0.05) {
+                self.driver.isConnected = true
+                self.link.handleConnected()
+            }
+        }
+        driver.onDiscoverServices = { [unowned self] in central.async { self.link.handleServicesDiscovered(error: nil) } }
+        driver.onDiscoverCharacteristics = { [unowned self] in central.async { self.link.handleCharacteristicsDiscovered() } }
+        let connection = EscPosBluetoothConnection(link: link, queue: queue, timeouts: EscPosBluetoothTimeouts(connect: 5, discovery: 1, write: 1))
+        connection.pacesSends = false
+        queue.sync {
+            link.connect(attempt: 100)
+            link.cancel()
+        }
+
+        central.async(after: 0.2) {
+            self.driver.isAvailable = false
+            self.link.handleUnavailable()
+        }
+        let started = Date()
+        XCTAssertThrowsError(try connection.connect())
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2, "Bluetooth turning off fails the queued connect at once")
+        XCTAssertFalse(queue.sync { link.isCancelling })
+        XCTAssertThrowsError(try connection.connect(), "connecting while off fails")
+        XCTAssertEqual(queue.sync { driver.connectCalls }, 1)
+
+        queue.sync {
+            driver.isAvailable = true
+            answersConnect = true
+        }
+        try connection.connect()
+        XCTAssertTrue(connection.isConnected, "no terminal callback is needed after power-on")
         XCTAssertEqual(queue.sync { driver.connectCalls }, 2)
         connection.write([0x1B, 0x40])
         try connection.send()
