@@ -94,7 +94,12 @@ public class WrapperParityTest {
         try {
             plugin.getClass().getMethod(action, PluginCall.class).invoke(plugin, call);
             return answer.await();
-        } finally { plugin.handleOnDestroy(); }
+        } finally {
+            plugin.handleOnDestroy();
+            Field executor = ThermalPrinterPlugin.class.getDeclaredField("executor");
+            executor.setAccessible(true);
+            assertTrue("Plugin cleanup did not complete", ((java.util.concurrent.ExecutorService) executor.get(plugin)).awaitTermination(20, TimeUnit.SECONDS));
+        }
     }
 
     private static String hex(byte[] bytes) {
