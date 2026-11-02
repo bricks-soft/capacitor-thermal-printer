@@ -1,6 +1,6 @@
 {
   "name": "@bricks-soft/capacitor-thermal-printer",
-  "version": "8.0.0",
+  "version": "8.0.1",
   "description": "ESC/POS receipt printing over Bluetooth, TCP and USB for Capacitor.",
   "main": "dist/plugin.cjs.js",
   "module": "dist/esm/index.js",

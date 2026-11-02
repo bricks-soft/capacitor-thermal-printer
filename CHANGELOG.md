@@ -2,6 +2,10 @@
 
 The major version follows Capacitor. Versions within it follow [Semantic Versioning](https://semver.org/).
 
+## [8.0.1] - 2026-11-02
+
+First version published by CI through npm trusted publishing, with a provenance statement. No code changes.
+
 ## [8.0.0] - 2026-11-02
 
 First release as a Capacitor 8 plugin, replacing the Cordova plugin `thermal-printer-cordova-plugin`.
