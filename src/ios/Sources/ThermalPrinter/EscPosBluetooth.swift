@@ -44,6 +44,7 @@ final class EscPosBluetoothCentral: NSObject, CBCentralManagerDelegate {
     private let store: EscPosKnownPrinterStore
     private var manager: EscPosCentralManaging?
     private var stateEvent: DispatchSemaphore?
+    private var authorizationRequests: [(CBManagerAuthorization?) -> Void] = []
     private var scanEvent: DispatchSemaphore?
     private var scanMatch: ((EscPosBluetoothDevice) -> Bool)?
     private var scanResults: [EscPosBluetoothDevice] = []
@@ -70,21 +71,33 @@ final class EscPosBluetoothCentral: NSObject, CBCentralManagerDelegate {
         authorizationSource()
     }
 
-    func waitForAuthorization() -> CBManagerAuthorization {
-        if authorization != .notDetermined {
-            return authorization
-        }
-        _ = queue.sync { ensureManager() }
-        let deadline = Date().addingTimeInterval(EscPosBluetoothCentral.authorizationTimeout)
-        while authorization == .notDetermined && Date() < deadline {
-            let event = queue.sync { () -> DispatchSemaphore in
-                let semaphore = DispatchSemaphore(value: 0)
-                stateEvent = semaphore
-                return semaphore
+    func requestAuthorization(_ completion: @escaping (CBManagerAuthorization?) -> Void) {
+        queue.sync {
+            let current = authorization
+            guard current == .notDetermined else {
+                completion(current)
+                return
             }
-            _ = event.wait(timeout: .now() + 0.5)
+            authorizationRequests.append(completion)
+            ensureManager()
         }
+    }
+
+    func cancelAuthorizationRequests() {
+        queue.sync { finishAuthorizationRequests(nil) }
+    }
+
+    func waitForAuthorization() -> CBManagerAuthorization {
+        let answered = DispatchSemaphore(value: 0)
+        requestAuthorization { _ in answered.signal() }
+        _ = answered.wait(timeout: .now() + EscPosBluetoothCentral.authorizationTimeout)
         return authorization
+    }
+
+    private func finishAuthorizationRequests(_ answer: CBManagerAuthorization?) {
+        let requests = authorizationRequests
+        authorizationRequests = []
+        requests.forEach { $0(answer) }
     }
 
     func waitForState() -> CBManagerState {
@@ -109,6 +122,10 @@ final class EscPosBluetoothCentral: NSObject, CBCentralManagerDelegate {
     func handleStateUpdate() {
         queue.sync {
             stateEvent?.signal()
+            let current = authorization
+            if current != .notDetermined {
+                finishAuthorizationRequests(current)
+            }
             guard let manager = manager, manager.state != .poweredOn else { return }
             for link in links.values {
                 link.handleDisconnected(nil)
@@ -210,7 +227,7 @@ final class EscPosBluetoothCentral: NSObject, CBCentralManagerDelegate {
             if let existing = connections[peripheral.identifier] {
                 return existing
             }
-            let link = EscPosCoreBluetoothLink(driver: EscPosCBPeripheralDriver(peripheral: peripheral, central: self), queue: queue)
+            let link = EscPosCoreBluetoothLink(driver: EscPosCBPeripheralDriver(peripheral: peripheral, central: self))
             links[peripheral.identifier] = link
             linkedPeripherals[peripheral.identifier] = peripheral
             let created = EscPosBluetoothConnection(link: link, queue: queue) { [weak self] in

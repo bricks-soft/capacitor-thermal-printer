@@ -4,6 +4,10 @@ import Foundation
 final class ThermalPrinterCordovaPlugin: CDVPlugin {
     private let service = ThermalPrinterService()
 
+    override func onReset() {
+        service.cancelPendingRequests()
+    }
+
     @objc(listPrinters:)
     func listPrinters(_ command: CDVInvokedUrlCommand) {
         run("listPrinters", command)
@@ -47,16 +51,19 @@ final class ThermalPrinterCordovaPlugin: CDVPlugin {
     private func run(_ action: String, _ command: CDVInvokedUrlCommand) {
         let callbackId = command.callbackId
         service.execute(action, command.arguments ?? []) { [weak self] result in
-            self?.commandDelegate.send(ThermalPrinterCordovaPlugin.pluginResult(result), callbackId: callbackId)
+            guard let pluginResult = ThermalPrinterCordovaPlugin.pluginResult(result) else { return }
+            self?.commandDelegate.send(pluginResult, callbackId: callbackId)
         }
     }
 
-    private static func pluginResult(_ result: ThermalPrinterResult) -> CDVPluginResult {
+    private static func pluginResult(_ result: ThermalPrinterResult) -> CDVPluginResult? {
         switch result {
         case .success(let payload):
             return pluginResult(status: .ok, payload: payload)
         case .error(let payload):
             return pluginResult(status: .error, payload: payload)
+        case .cancelled:
+            return nil
         }
     }
 

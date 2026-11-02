@@ -73,19 +73,13 @@ final class CoreBluetoothLinkTests: XCTestCase {
     private var driver: StubPeripheralDriver!
     private var link: EscPosCoreBluetoothLink!
     private var events: RecordingLinkEvents!
-    private var savedGrace: TimeInterval = 0
 
     override func setUp() {
-        savedGrace = EscPosCoreBluetoothLink.cancellationGrace
         queue = EscPosQueue(label: "test.core-bluetooth-link")
         driver = StubPeripheralDriver()
-        link = EscPosCoreBluetoothLink(driver: driver, queue: queue)
+        link = EscPosCoreBluetoothLink(driver: driver)
         events = RecordingLinkEvents()
         link.events = events
-    }
-
-    override func tearDown() {
-        EscPosCoreBluetoothLink.cancellationGrace = savedGrace
     }
 
     private func onQueue(_ block: () -> Void) {
@@ -167,20 +161,95 @@ final class CoreBluetoothLinkTests: XCTestCase {
         }
     }
 
-    func testMissingTerminalCallbackReleasesTheNextConnectAfterTheGracePeriod() {
-        EscPosCoreBluetoothLink.cancellationGrace = 0.2
+    func testLateCallbacksOfACancelledPendingConnectionStayWithIt() {
         onQueue {
             link.connect(attempt: 1)
             link.cancel()
             link.connect(attempt: 2)
         }
-        Thread.sleep(forTimeInterval: 0.35)
+        Thread.sleep(forTimeInterval: 2.5)
         onQueue {
-            XCTAssertEqual(driver.connectCalls, 2)
+            XCTAssertEqual(driver.connectCalls, 1, "time alone does not end the cancellation")
+            XCTAssertEqual(events.log, [])
+            link.handleConnected()
+            XCTAssertEqual(events.log, [], "the old connection's didConnect is not attempt 2's")
+            link.handleDisconnected(nil)
             XCTAssertEqual(events.log, ["disconnected 1"])
+            XCTAssertEqual(driver.connectCalls, 2)
+            driver.isConnected = true
             link.handleConnected()
             XCTAssertEqual(events.log, ["disconnected 1", "connected 2"])
         }
+    }
+
+    func testLateCallbacksOfACancelledSessionStayWithIt() {
+        onQueue {
+            driver.services = StubPeripheralDriver.printerServices([.write])
+            link.connect(attempt: 1)
+            driver.isConnected = true
+            link.handleConnected()
+            link.discoverPrinterCharacteristic(attempt: 1)
+            link.handleServicesDiscovered(error: nil)
+            link.handleCharacteristicsDiscovered()
+            link.write(Data([1]), type: .withResponse, token: 7)
+            link.cancel()
+            link.connect(attempt: 2)
+        }
+        Thread.sleep(forTimeInterval: 2.5)
+        onQueue {
+            XCTAssertEqual(driver.connectCalls, 1, "time alone does not end the cancellation")
+            link.handleWriteResponse(error: nil)
+            link.handleReadyToSend()
+            link.handleConnected()
+            XCTAssertEqual(events.log, ["connected 1", "discovered 1 withResponse"])
+            driver.isConnected = false
+            link.handleDisconnected(nil)
+            XCTAssertEqual(driver.connectCalls, 2)
+            driver.isConnected = true
+            link.handleConnected()
+            link.discoverPrinterCharacteristic(attempt: 2)
+            link.handleServicesDiscovered(error: nil)
+            link.handleCharacteristicsDiscovered()
+            link.write(Data([2]), type: .withResponse, token: 8)
+            link.handleWriteResponse(error: nil)
+            XCTAssertEqual(events.log, ["connected 1", "discovered 1 withResponse", "disconnected 1", "connected 2", "discovered 2 withResponse", "wrote 8"])
+        }
+    }
+
+    func testQueuedConnectTimesOutWhileTheCancellationIsUnfinishedAndTheNextOneSucceeds() throws {
+        let central = queue!
+        driver.services = StubPeripheralDriver.printerServices()
+        var answersConnect = false
+        driver.onConnect = { [unowned self] in
+            guard answersConnect else { return }
+            central.async(after: 0.05) {
+                self.driver.isConnected = true
+                self.link.handleConnected()
+            }
+        }
+        driver.onDiscoverServices = { [unowned self] in central.async { self.link.handleServicesDiscovered(error: nil) } }
+        driver.onDiscoverCharacteristics = { [unowned self] in central.async { self.link.handleCharacteristicsDiscovered() } }
+        link.events = nil
+        let connection = EscPosBluetoothConnection(link: link, queue: queue, timeouts: EscPosBluetoothTimeouts(connect: 0.3, discovery: 1, write: 1))
+        connection.pacesSends = false
+
+        XCTAssertThrowsError(try connection.connect())
+        XCTAssertTrue(queue.sync { link.isCancelling })
+        XCTAssertThrowsError(try connection.connect(), "a connect queued behind the cancellation fails at its own timeout")
+        XCTAssertEqual(queue.sync { driver.connectCalls }, 1)
+        queue.sync { link.handleConnected() }
+        XCTAssertFalse(connection.isConnected, "the old connection's didConnect is not adopted")
+
+        queue.sync { link.handleDisconnected(nil) }
+        XCTAssertFalse(queue.sync { link.isCancelling })
+        XCTAssertEqual(queue.sync { driver.connectCalls }, 1, "the timed-out connect was not left queued")
+        answersConnect = true
+        try connection.connect()
+        XCTAssertTrue(connection.isConnected)
+        XCTAssertEqual(queue.sync { driver.connectCalls }, 2)
+        connection.write([0x1B, 0x40])
+        try connection.send()
+        XCTAssertEqual(queue.sync { driver.writes.map(\.0) }, [Data([0x1B, 0x40])])
     }
 
     func testWriteAcknowledgementsKeepTheirOrderWithinASession() {

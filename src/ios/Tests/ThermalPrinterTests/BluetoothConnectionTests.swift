@@ -341,53 +341,164 @@ final class BluetoothAuthorizationTests: XCTestCase {
         return (ThermalPrinterService(makeBluetoothCentral: { central }), central)
     }
 
-    func testPromptAnsweredWithAllowGrantsPermission() {
+    static func requestPermission(_ service: ThermalPrinterService) -> LockedValue<[ThermalPrinterResult]> {
+        let results = LockedValue<[ThermalPrinterResult]>([])
+        service.execute("requestBTPermissions", [["type": "bluetooth"]]) { result in
+            results.value += [result]
+        }
+        return results
+    }
+
+    static func waitFor(_ results: LockedValue<[ThermalPrinterResult]>, timeout: TimeInterval = 5) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while results.value.isEmpty && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+    }
+
+    private func answer(_ value: CBManagerAuthorization, state: CBManagerState, authorization: LockedValue<CBManagerAuthorization>, manager: FakeCentralManager, central: EscPosBluetoothCentral) {
+        authorization.value = value
+        manager.state = state
+        central.handleStateUpdate()
+    }
+
+    func testAllowGivenAfterTheListingWaitLimitGrantsPermission() {
+        EscPosBluetoothCentral.authorizationTimeout = 0.2
         let authorization = LockedValue(CBManagerAuthorization.notDetermined)
         let manager = FakeCentralManager(state: .unknown)
         let made = LockedValue(0)
         let (service, central) = Self.makeService(authorization: authorization, manager: manager, managersMade: made)
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
-            authorization.value = .allowedAlways
-            manager.state = .poweredOn
-            central.handleStateUpdate()
-        }
-        let result = service.run("requestBTPermissions", [["type": "bluetooth"]])
-        guard case .success(let value) = result else { return XCTFail("\(result)") }
+
+        let results = Self.requestPermission(service)
+        Thread.sleep(forTimeInterval: 0.6)
+        XCTAssertTrue(results.value.isEmpty, "no answer yet, so no result")
+        XCTAssertEqual(made.value, 1, "the request shows the prompt")
+        central.handleStateUpdate()
+        XCTAssertTrue(results.value.isEmpty, "a state update without an answer does not complete the request")
+
+        answer(.allowedAlways, state: .poweredOn, authorization: authorization, manager: manager, central: central)
+        Self.waitFor(results)
+        central.handleStateUpdate()
+        Thread.sleep(forTimeInterval: 0.1)
+        XCTAssertEqual(results.value.count, 1)
+        guard case .success(let value)? = results.value.first else { return XCTFail("\(results.value)") }
         XCTAssertEqual(value as? [String: Bool], ["granted": true])
-        XCTAssertEqual(made.value, 1)
     }
 
-    func testPromptAnsweredWithDenyRefusesPermission() {
+    func testDenyGivenAfterTheListingWaitLimitRefusesPermission() {
+        EscPosBluetoothCentral.authorizationTimeout = 0.2
         let authorization = LockedValue(CBManagerAuthorization.notDetermined)
         let manager = FakeCentralManager(state: .unknown)
         let (service, central) = Self.makeService(authorization: authorization, manager: manager, managersMade: LockedValue(0))
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
-            authorization.value = .denied
-            manager.state = .unauthorized
-            central.handleStateUpdate()
-        }
-        let result = service.run("requestBTPermissions", [["type": "bluetooth"]])
-        guard case .error(let value) = result else { return XCTFail("\(result)") }
+
+        let results = Self.requestPermission(service)
+        Thread.sleep(forTimeInterval: 0.6)
+        XCTAssertTrue(results.value.isEmpty)
+        answer(.denied, state: .unauthorized, authorization: authorization, manager: manager, central: central)
+        Self.waitFor(results)
+        central.handleStateUpdate()
+        Thread.sleep(forTimeInterval: 0.1)
+        XCTAssertEqual(results.value.count, 1)
+        guard case .error(let value)? = results.value.first else { return XCTFail("\(results.value)") }
         XCTAssertEqual(value as? [String: Bool], ["granted": false])
+    }
+
+    func testUnansweredPromptKeepsTheRequestOpenWithoutBlockingOtherCalls() {
+        EscPosBluetoothCentral.authorizationTimeout = 0.2
+        let (service, _) = Self.makeService(authorization: LockedValue(.notDetermined), manager: FakeCentralManager(state: .unknown), managersMade: LockedValue(0))
+
+        let results = Self.requestPermission(service)
+        let other = LockedValue<[ThermalPrinterResult]>([])
+        service.execute("listPrinters", [["type": "usb"]]) { other.value += [$0] }
+        Self.waitFor(other, timeout: 1)
+        XCTAssertEqual(other.value.count, 1, "the open request does not hold the command queue")
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertTrue(results.value.isEmpty, "an unanswered prompt is not reported as denied")
+    }
+
+    func testTeardownCancelsTheRequestOnceWithoutReportingDenial() {
+        let authorization = LockedValue(CBManagerAuthorization.notDetermined)
+        let manager = FakeCentralManager(state: .unknown)
+        let (service, central) = Self.makeService(authorization: authorization, manager: manager, managersMade: LockedValue(0))
+
+        let results = Self.requestPermission(service)
+        Thread.sleep(forTimeInterval: 0.2)
+        service.cancelPendingRequests()
+        Self.waitFor(results)
+        answer(.allowedAlways, state: .poweredOn, authorization: authorization, manager: manager, central: central)
+        Thread.sleep(forTimeInterval: 0.1)
+        XCTAssertEqual(results.value.count, 1)
+        guard case .cancelled? = results.value.first else { return XCTFail("\(results.value)") }
+    }
+
+    func testReleasingTheServiceCancelsTheRequest() throws {
+        let authorization = LockedValue(CBManagerAuthorization.notDetermined)
+        var service: ThermalPrinterService?
+        var central: EscPosBluetoothCentral?
+        do {
+            let made = Self.makeService(authorization: authorization, manager: FakeCentralManager(state: .unknown), managersMade: LockedValue(0))
+            service = made.0
+            central = made.1
+        }
+        let results = Self.requestPermission(try XCTUnwrap(service))
+        Thread.sleep(forTimeInterval: 0.2)
+        service = nil
+        Self.waitFor(results)
+        authorization.value = .allowedAlways
+        central?.handleStateUpdate()
+        XCTAssertEqual(results.value.count, 1)
+        guard case .cancelled? = results.value.first else { return XCTFail("\(results.value)") }
+    }
+
+    func testEveryWaitingRequestGetsTheAnswerOnce() {
+        let authorization = LockedValue(CBManagerAuthorization.notDetermined)
+        let manager = FakeCentralManager(state: .unknown)
+        let made = LockedValue(0)
+        let (service, central) = Self.makeService(authorization: authorization, manager: manager, managersMade: made)
+
+        let first = Self.requestPermission(service)
+        let second = Self.requestPermission(service)
+        Thread.sleep(forTimeInterval: 0.2)
+        answer(.allowedAlways, state: .poweredOn, authorization: authorization, manager: manager, central: central)
+        Self.waitFor(first)
+        Self.waitFor(second)
+        answer(.allowedAlways, state: .poweredOn, authorization: authorization, manager: manager, central: central)
+        Thread.sleep(forTimeInterval: 0.1)
+        XCTAssertEqual(first.value.count, 1)
+        XCTAssertEqual(second.value.count, 1)
+        XCTAssertEqual(made.value, 1)
+        let third = Self.requestPermission(service)
+        Self.waitFor(third)
+        guard case .success(let value)? = third.value.first else { return XCTFail("\(third.value)") }
+        XCTAssertEqual(value as? [String: Bool], ["granted": true], "an earlier answer completes a new request at once")
     }
 
     func testRestrictedAccessIsRefusedWithoutPrompting() {
         let made = LockedValue(0)
         let (service, _) = Self.makeService(authorization: LockedValue(.restricted), manager: FakeCentralManager(state: .unauthorized), managersMade: made)
-        let result = service.run("requestBTPermissions", [["type": "bluetooth"]])
-        guard case .error(let value) = result else { return XCTFail("\(result)") }
+        let results = Self.requestPermission(service)
+        Self.waitFor(results)
+        guard case .error(let value)? = results.value.first else { return XCTFail("\(results.value)") }
         XCTAssertEqual(value as? [String: Bool], ["granted": false])
         XCTAssertEqual(made.value, 0)
     }
 
-    func testUnansweredPromptTimesOut() {
-        EscPosBluetoothCentral.authorizationTimeout = 0.5
-        let (service, _) = Self.makeService(authorization: LockedValue(.notDetermined), manager: FakeCentralManager(state: .unknown), managersMade: LockedValue(0))
-        let started = Date()
-        let result = service.run("requestBTPermissions", [["type": "bluetooth"]])
-        guard case .error(let value) = result else { return XCTFail("\(result)") }
-        XCTAssertEqual(value as? [String: Bool], ["granted": false])
-        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+    func testListingWithAnUnansweredPromptFailsAfterItsWaitAndKeepsThePromptOpen() {
+        EscPosBluetoothCentral.authorizationTimeout = 0.3
+        let authorization = LockedValue(CBManagerAuthorization.notDetermined)
+        let manager = FakeCentralManager(state: .unknown)
+        let (service, central) = Self.makeService(authorization: authorization, manager: manager, managersMade: LockedValue(0))
+        EscPosBluetoothCentral.stateTimeout = 0.3
+
+        let listed = service.run("listPrinters", [["type": "bluetooth"]])
+        guard case .error(let value) = listed else { return XCTFail("\(listed)") }
+        XCTAssertEqual(value as? [String: String], ["error": "Missing permission for Bluetooth!"])
+        let results = Self.requestPermission(service)
+        answer(.allowedAlways, state: .poweredOn, authorization: authorization, manager: manager, central: central)
+        Self.waitFor(results)
+        guard case .success? = results.value.first else { return XCTFail("\(results.value)") }
+        let relisted = service.run("listPrinters", [["type": "bluetooth"]])
+        guard case .success = relisted else { return XCTFail("\(relisted)") }
     }
 
     func testBluetoothStatesMapToAndroidErrors() {

@@ -59,24 +59,19 @@ final class EscPosCBPeripheralDriver: EscPosPeripheralDriver {
 }
 
 final class EscPosCoreBluetoothLink: NSObject, EscPosBluetoothLink, CBPeripheralDelegate {
-    static var cancellationGrace: TimeInterval = 2
-
     weak var events: EscPosBluetoothLinkEvents?
     let driver: EscPosPeripheralDriver
-    private let queue: EscPosQueue
     private var session: Int?
     private var pendingConnect: Int?
     private var closing: Int?
-    private var cancellations = 0
     private var queuedConnect: Int?
     private var pendingDiscovery: Int?
     private var pendingWrites: [Int] = []
     private var characteristic: CBCharacteristic?
     private var pendingCharacteristicDiscoveries = 0
 
-    init(driver: EscPosPeripheralDriver, queue: EscPosQueue) {
+    init(driver: EscPosPeripheralDriver) {
         self.driver = driver
-        self.queue = queue
         super.init()
     }
 
@@ -116,13 +111,7 @@ final class EscPosCoreBluetoothLink: NSObject, EscPosBluetoothLink, CBPeripheral
         pendingConnect = nil
         guard let open = open else { return }
         closing = open
-        cancellations += 1
-        let cancellation = cancellations
         driver.cancelConnection()
-        queue.async(after: EscPosCoreBluetoothLink.cancellationGrace) { [weak self] in
-            guard let self = self, self.closing == open, self.cancellations == cancellation else { return }
-            self.finishCancellation { $0.linkDidDisconnect(attempt: open, error: nil) }
-        }
     }
 
     func discoverPrinterCharacteristic(attempt: Int) {

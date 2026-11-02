@@ -4,6 +4,7 @@ import Foundation
 enum ThermalPrinterResult {
     case success(Any?)
     case error(Any)
+    case cancelled
 }
 
 struct ThermalPrinterFailure: Error {
@@ -100,6 +101,10 @@ final class ThermalPrinterService {
         self.makeTcpConnection = makeTcpConnection
     }
 
+    deinit {
+        bluetoothCentral?.cancelAuthorizationRequests()
+    }
+
     private var bluetooth: EscPosBluetoothCentral {
         if let central = bluetoothCentral {
             return central
@@ -111,7 +116,17 @@ final class ThermalPrinterService {
 
     func execute(_ action: String, _ arguments: [Any], completion: @escaping (ThermalPrinterResult) -> Void) {
         queue.async {
+            if action == "requestBTPermissions", arguments.first is [String: Any] {
+                self.requestBTPermissions(completion)
+                return
+            }
             completion(self.run(action, arguments))
+        }
+    }
+
+    func cancelPendingRequests() {
+        queue.async {
+            self.bluetoothCentral?.cancelAuthorizationRequests()
         }
     }
 
@@ -124,8 +139,6 @@ final class ThermalPrinterService {
             switch action {
             case "listPrinters":
                 return try listPrinters(data)
-            case "requestBTPermissions":
-                return requestBTPermissions()
             case "printFormattedText", "printFormattedTextAndCut":
                 return try printFormattedText(action, data)
             case "getEncoding":
@@ -150,12 +163,16 @@ final class ThermalPrinterService {
         }
     }
 
-    private func requestBTPermissions() -> ThermalPrinterResult {
-        switch bluetooth.waitForAuthorization() {
-        case .allowedAlways:
-            return .success(["granted": true])
-        default:
-            return .error(["granted": false])
+    private func requestBTPermissions(_ completion: @escaping (ThermalPrinterResult) -> Void) {
+        bluetooth.requestAuthorization { answer in
+            switch answer {
+            case .some(.allowedAlways):
+                completion(.success(["granted": true]))
+            case .none:
+                completion(.cancelled)
+            default:
+                completion(.error(["granted": false]))
+            }
         }
     }
 
@@ -344,7 +361,7 @@ final class ThermalPrinterService {
             _ = bluetooth.waitForAuthorization()
         }
         switch bluetooth.authorization {
-        case .denied, .restricted:
+        case .denied, .restricted, .notDetermined:
             throw ThermalPrinterFailure(payload: ["error": "Missing permission for Bluetooth!"])
         default:
             break
